@@ -24,6 +24,7 @@ pub fn upgrade_state_to_heze<E: EthSpec>(
 ) -> Result<BeaconState<E>, Error> {
     let epoch = pre_state.current_epoch();
     let pre = pre_state.as_gloas_mut()?;
+    let validator_count = pre.validators.len();
     // Where possible, use something like `mem::take` to move fields from behind the &mut
     // reference. For other fields that don't have a good default value, use `clone`.
     //
@@ -116,7 +117,7 @@ pub fn upgrade_state_to_heze<E: EthSpec>(
         // Heze (EIP-8321)
         randao_commitments: ProgressiveList::try_from_iter(std::iter::repeat_n(
             Hash256::ZERO,
-            pre.validators.len(),
+            validator_count,
         ))?,
         pending_randao_commitments: Default::default(),
         // Caches
