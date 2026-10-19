@@ -24,7 +24,7 @@ use typenum::Unsigned;
 
 use crate::{
     ExecutionBlockHash, ExecutionPayloadBidGloas, ExecutionPayloadBidHeze, ExecutionPayloadBidRef,
-    ExecutionPayloadBidRefMut, Withdrawal,
+    ExecutionPayloadBidRefMut, PendingRandaoCommitment, Withdrawal,
     attestation::{
         AttestationData, AttestationDuty, BeaconCommittee, Checkpoint, CommitteeIndex, PTC,
         ParticipationFlags, PendingAttestation,
@@ -465,7 +465,7 @@ impl From<BeaconStateHash> for Hash256 {
                 struct_behaviour = "progressive_container",
                 active_fields(
                     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+                    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
                 )
             )
         )
@@ -809,6 +809,17 @@ where
     #[cfg_attr(feature = "arbitrary", arbitrary(default))]
     #[superstruct(only(Gloas, Heze))]
     pub ptc_window: Vector<FixedVector<u64, E::PTCSize>, E::PtcWindowLength>,
+
+    // Heze (EIP-8321)
+    #[compare_fields(as_iter)]
+    #[cfg_attr(feature = "arbitrary", arbitrary(default))]
+    #[superstruct(only(Heze))]
+    pub randao_commitments: ProgressiveList<Hash256>,
+
+    #[compare_fields(as_iter)]
+    #[cfg_attr(feature = "arbitrary", arbitrary(default))]
+    #[superstruct(only(Heze))]
+    pub pending_randao_commitments: ProgressiveList<PendingRandaoCommitment>,
 
     // Caching (not in the spec)
     #[serde(skip_serializing, skip_deserializing)]
