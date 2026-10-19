@@ -1,8 +1,9 @@
+use milhouse::ProgressiveList;
 use ssz_types::BitVector;
 use std::mem;
 use types::{
     BeaconState, BeaconStateError as Error, BeaconStateHeze, ChainSpec, EthSpec,
-    ExecutionPayloadBidHeze, Fork,
+    ExecutionPayloadBidHeze, Fork, Hash256,
 };
 
 /// Transform a `Gloas` state into a `Heze` state.
@@ -113,7 +114,10 @@ pub fn upgrade_state_to_heze<E: EthSpec>(
         payload_expected_withdrawals: mem::take(&mut pre.payload_expected_withdrawals),
         ptc_window: pre.ptc_window.clone(),
         // Heze (EIP-8321)
-        randao_commitments: Default::default(),
+        randao_commitments: ProgressiveList::try_from_iter(std::iter::repeat_n(
+            Hash256::ZERO,
+            pre.validators.len(),
+        ))?,
         pending_randao_commitments: Default::default(),
         // Caches
         total_active_balance: pre.total_active_balance,

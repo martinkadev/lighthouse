@@ -2471,6 +2471,10 @@ impl<E: EthSpec> BeaconState<E> {
             inactivity_scores.push(0)?;
         }
 
+        if let Self::Heze(state) = self {
+            state.randao_commitments.push(Hash256::ZERO)?;
+        }
+
         // Keep the pubkey cache up to date if it was up to date prior to this call.
         //
         // Doing this here while we know the pubkey and index is marginally quicker than doing it in
