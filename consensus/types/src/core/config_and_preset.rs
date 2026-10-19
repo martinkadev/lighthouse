@@ -147,6 +147,7 @@ pub fn get_extra_fields(spec: &ChainSpec) -> HashMap<String, Value> {
         "domain_beacon_proposer".to_uppercase() => u32_hex(spec.domain_beacon_proposer),
         "domain_beacon_attester".to_uppercase() => u32_hex(spec.domain_beacon_attester),
         "domain_randao".to_uppercase()=> u32_hex(spec.domain_randao),
+        "domain_randao_commitment_registration".to_uppercase()=> u32_hex(spec.domain_randao_commitment_registration),
         "domain_deposit".to_uppercase()=> u32_hex(spec.domain_deposit),
         "domain_voluntary_exit".to_uppercase() => u32_hex(spec.domain_voluntary_exit),
         "domain_selection_proof".to_uppercase() => u32_hex(spec.domain_selection_proof),

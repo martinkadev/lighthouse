@@ -825,6 +825,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                             payload_attestations,
                         )
                         .map_err(BlockProductionError::SszTypesError)?,
+                        hash_chain_reveal: Hash256::default(),
+                        randao_commitment_registrations: Default::default(),
                         _phantom: PhantomData::<FullPayload<T::EthSpec>>,
                     },
                 })

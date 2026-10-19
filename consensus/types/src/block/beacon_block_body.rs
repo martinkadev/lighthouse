@@ -5,6 +5,7 @@ use context_deserialize::{ContextDeserialize, context_deserialize};
 use educe::Educe;
 use merkle_proof::MerkleTree;
 use metastruct::metastruct;
+use milhouse::ProgressiveList;
 use serde::{Deserialize, Deserializer, Serialize};
 use ssz_derive::{Decode, Encode};
 use ssz_types::{FixedVector, ProgressiveVariableList, VariableList};
@@ -14,7 +15,7 @@ use tree_hash_derive::TreeHash;
 
 use crate::{
     ListRef, SignedExecutionPayloadBidGloas, SignedExecutionPayloadBidHeze,
-    SignedExecutionPayloadBidRef,
+    SignedExecutionPayloadBidRef, SignedRandaoCommitmentRegistration,
     attestation::{
         AttestationBase, AttestationElectra, AttestationGloas, AttestationRef, AttestationRefMut,
         PayloadAttestation,
@@ -61,6 +62,7 @@ pub const BLOB_KZG_COMMITMENTS_INDEX: usize = 11;
 ///
 /// Must match the `active_fields` attribute on the struct.
 pub const BEACON_BLOCK_BODY_ACTIVE_FIELDS: [bool; 13] = [true; 13];
+pub const BEACON_BLOCK_BODY_ACTIVE_FIELDS_HEZE: [bool; 15] = [true; 15];
 
 /// The body of a `BeaconChain` block, containing operations.
 ///
@@ -109,7 +111,7 @@ pub const BEACON_BLOCK_BODY_ACTIVE_FIELDS: [bool; 13] = [true; 13];
             metastruct(mappings(beacon_block_body_heze_fields(groups(fields)))),
             tree_hash(
                 struct_behaviour = "progressive_container",
-                active_fields(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
+                active_fields(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
             )
         ),
     ),
@@ -240,6 +242,11 @@ pub struct BeaconBlockBody<E: EthSpec, Payload: AbstractExecPayload<E> = FullPay
         ProgressiveVariableList<PayloadAttestation<E>, E::MaxPayloadAttestations>,
     #[superstruct(only(Gloas, Heze))]
     pub parent_execution_requests: ExecutionRequestsGloas<E>,
+    #[superstruct(only(Heze))]
+    pub hash_chain_reveal: Hash256,
+    #[superstruct(only(Heze))]
+    #[educe(Hash(ignore))]
+    pub randao_commitment_registrations: ProgressiveList<SignedRandaoCommitmentRegistration>,
     #[superstruct(only(Base, Altair, Gloas, Heze))]
     #[metastruct(exclude_from(fields))]
     #[ssz(skip_serializing, skip_deserializing)]
@@ -447,9 +454,14 @@ impl<'a, E: EthSpec, Payload: AbstractExecPayload<E>> BeaconBlockBodyRef<'a, E, 
 
         proof.push(signature.tree_hash_root());
 
+        let active_fields: &[bool] = match self {
+            Self::Heze(_) => &BEACON_BLOCK_BODY_ACTIVE_FIELDS_HEZE,
+            _ => &BEACON_BLOCK_BODY_ACTIVE_FIELDS,
+        };
+
         proof.extend(merkle_proof::progressive_container_proof(
             &self.body_merkle_leaves(),
-            &BEACON_BLOCK_BODY_ACTIVE_FIELDS,
+            active_fields,
             SIGNED_EXECUTION_PAYLOAD_BID_FIELD_INDEX,
         )?);
 
@@ -934,6 +946,8 @@ impl<E: EthSpec> From<BeaconBlockBodyHeze<E, BlindedPayload<E>>>
             parent_execution_requests,
             signed_execution_payload_bid,
             payload_attestations,
+            hash_chain_reveal,
+            randao_commitment_registrations,
             _phantom,
         } = body;
 
@@ -951,6 +965,8 @@ impl<E: EthSpec> From<BeaconBlockBodyHeze<E, BlindedPayload<E>>>
             parent_execution_requests,
             signed_execution_payload_bid,
             payload_attestations,
+            hash_chain_reveal,
+            randao_commitment_registrations,
             _phantom: PhantomData,
         }
     }
@@ -1316,6 +1332,8 @@ impl<E: EthSpec> From<BeaconBlockBodyHeze<E, FullPayload<E>>>
             parent_execution_requests,
             signed_execution_payload_bid,
             payload_attestations,
+            hash_chain_reveal,
+            randao_commitment_registrations,
             _phantom,
         } = body;
 
@@ -1334,6 +1352,8 @@ impl<E: EthSpec> From<BeaconBlockBodyHeze<E, FullPayload<E>>>
                 parent_execution_requests,
                 signed_execution_payload_bid,
                 payload_attestations,
+                hash_chain_reveal,
+                randao_commitment_registrations,
                 _phantom: PhantomData,
             },
             None,
@@ -1644,5 +1664,11 @@ mod tests {
                 Hash256::from(active_fields)
             );
         }
+    }
+    mod heze {
+        use super::super::*;
+        use crate::core::Spec;
+
+        ssz_and_tree_hash_tests!(BeaconBlockBodyHeze<Spec>);
     }
 }

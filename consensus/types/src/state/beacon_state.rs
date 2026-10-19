@@ -24,7 +24,7 @@ use typenum::Unsigned;
 
 use crate::{
     ExecutionBlockHash, ExecutionPayloadBidGloas, ExecutionPayloadBidHeze, ExecutionPayloadBidRef,
-    ExecutionPayloadBidRefMut, Withdrawal,
+    ExecutionPayloadBidRefMut, PendingRandaoCommitment, Withdrawal,
     attestation::{
         AttestationData, AttestationDuty, BeaconCommittee, Checkpoint, CommitteeIndex, PTC,
         ParticipationFlags, PendingAttestation,
@@ -465,7 +465,7 @@ impl From<BeaconStateHash> for Hash256 {
                 struct_behaviour = "progressive_container",
                 active_fields(
                     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+                    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
                 )
             )
         )
@@ -809,6 +809,17 @@ where
     #[cfg_attr(feature = "arbitrary", arbitrary(default))]
     #[superstruct(only(Gloas, Heze))]
     pub ptc_window: Vector<FixedVector<u64, E::PTCSize>, E::PtcWindowLength>,
+
+    // Heze (EIP-8321)
+    #[compare_fields(as_iter)]
+    #[cfg_attr(feature = "arbitrary", arbitrary(default))]
+    #[superstruct(only(Heze))]
+    pub randao_commitments: ProgressiveList<Hash256>,
+
+    #[compare_fields(as_iter)]
+    #[cfg_attr(feature = "arbitrary", arbitrary(default))]
+    #[superstruct(only(Heze))]
+    pub pending_randao_commitments: ProgressiveList<PendingRandaoCommitment>,
 
     // Caching (not in the spec)
     #[serde(skip_serializing, skip_deserializing)]
@@ -2460,6 +2471,10 @@ impl<E: EthSpec> BeaconState<E> {
             inactivity_scores.push(0)?;
         }
 
+        if let Self::Heze(state) = self {
+            state.randao_commitments.push(Hash256::ZERO)?;
+        }
+
         // Keep the pubkey cache up to date if it was up to date prior to this call.
         //
         // Doing this here while we know the pubkey and index is marginally quicker than doing it in
@@ -3805,6 +3820,7 @@ impl<E: EthSpec> ForkVersionDecode for BeaconState<E> {
 ///
 /// Must match the `active_fields` attribute on the Gloas and Heze variants.
 pub const BEACON_STATE_ACTIVE_FIELDS: [bool; 46] = [true; 46];
+pub const BEACON_STATE_ACTIVE_FIELDS_HEZE: [bool; 48] = [true; 48];
 
 impl<E: EthSpec> BeaconState<E> {
     /// The number of fields of the `BeaconState` rounded up to the nearest power of two.
@@ -3948,9 +3964,14 @@ impl<E: EthSpec> BeaconState<E> {
 
         // [Modified in Gloas:EIP7688] the state is a progressive container.
         if self.fork_name_unchecked().gloas_enabled() {
+            let active_fields: &[bool] = match self {
+                Self::Heze(_) => &BEACON_STATE_ACTIVE_FIELDS_HEZE,
+                _ => &BEACON_STATE_ACTIVE_FIELDS,
+            };
+
             return Ok(merkle_proof::progressive_container_proof(
                 leaves,
-                &BEACON_STATE_ACTIVE_FIELDS,
+                active_fields,
                 field_index,
             )?);
         }
@@ -4140,7 +4161,7 @@ mod progressive_container_tests {
             BeaconStateGloas::<MainnetEthSpec>::NUM_FIELDS
         );
         assert_eq!(
-            BEACON_STATE_ACTIVE_FIELDS.len(),
+            BEACON_STATE_ACTIVE_FIELDS_HEZE.len(),
             BeaconStateHeze::<MainnetEthSpec>::NUM_FIELDS
         );
     }

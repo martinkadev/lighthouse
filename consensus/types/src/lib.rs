@@ -52,3 +52,6 @@ pub use withdrawal::*;
 pub mod graffiti {
     pub use crate::core::{GRAFFITI_BYTES_LEN, Graffiti, GraffitiString};
 }
+
+pub mod randao_commitment;
+pub use randao_commitment::*;
