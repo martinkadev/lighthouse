@@ -5,6 +5,7 @@ use context_deserialize::{ContextDeserialize, context_deserialize};
 use educe::Educe;
 use merkle_proof::MerkleTree;
 use metastruct::metastruct;
+use milhouse::ProgressiveList;
 use serde::{Deserialize, Deserializer, Serialize};
 use ssz_derive::{Decode, Encode};
 use ssz_types::{FixedVector, ProgressiveVariableList, VariableList};
@@ -244,8 +245,8 @@ pub struct BeaconBlockBody<E: EthSpec, Payload: AbstractExecPayload<E> = FullPay
     #[superstruct(only(Heze))]
     pub hash_chain_reveal: Hash256,
     #[superstruct(only(Heze))]
-    pub randao_commitment_registrations:
-        VariableList<SignedRandaoCommitmentRegistration, E::MaxRandaoCommitmentRegistrations>,
+    #[educe(Hash(ignore))]
+    pub randao_commitment_registrations: ProgressiveList<SignedRandaoCommitmentRegistration>,
     #[superstruct(only(Base, Altair, Gloas, Heze))]
     #[metastruct(exclude_from(fields))]
     #[ssz(skip_serializing, skip_deserializing)]

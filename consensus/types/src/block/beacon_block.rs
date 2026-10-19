@@ -766,7 +766,7 @@ impl<E: EthSpec, Payload: AbstractExecPayload<E>> EmptyBlock for BeaconBlockHeze
                 signed_execution_payload_bid: SignedExecutionPayloadBidHeze::empty(),
                 payload_attestations: ProgressiveVariableList::empty(),
                 hash_chain_reveal: Hash256::zero(),
-                randao_commitment_registrations: VariableList::empty(),
+                randao_commitment_registrations: Default::default(),
                 _phantom: PhantomData,
             },
         }
