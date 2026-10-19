@@ -112,6 +112,9 @@ pub fn upgrade_state_to_heze<E: EthSpec>(
         latest_block_hash: pre.latest_block_hash,
         payload_expected_withdrawals: mem::take(&mut pre.payload_expected_withdrawals),
         ptc_window: pre.ptc_window.clone(),
+        // Heze (EIP-8321)
+        randao_commitments: Default::default(),
+        pending_randao_commitments: Default::default(),
         // Caches
         total_active_balance: pre.total_active_balance,
         progressive_balances_cache: mem::take(&mut pre.progressive_balances_cache),

@@ -11,7 +11,7 @@ use execution_layer::{
 use futures::future::OptionFuture;
 use operation_pool::CompactAttestationRef;
 use ssz::{BitVector, Encode, ProgressiveBitList, TryFromIter};
-use ssz_types::ProgressiveVariableList;
+use ssz_types::{ProgressiveVariableList, VariableList};
 use state_processing::common::{get_attesting_indices_from_state, get_indexed_payload_attestation};
 use state_processing::envelope_processing::verify_execution_payload_envelope;
 use state_processing::epoch_cache::initialize_epoch_cache;
@@ -825,6 +825,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                             payload_attestations,
                         )
                         .map_err(BlockProductionError::SszTypesError)?,
+                        hash_chain_reveal: Hash256::default(),
+                        randao_commitment_registrations: VariableList::empty(),
                         _phantom: PhantomData::<FullPayload<T::EthSpec>>,
                     },
                 })

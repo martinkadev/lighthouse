@@ -183,6 +183,10 @@ pub trait EthSpec: 'static + Default + Sync + Send + Clone + Debug + PartialEq +
      * New in Heze
      */
     type InclusionListCommitteeSize: Unsigned + Clone + Sync + Send + Debug + PartialEq;
+    /*
+     * EIP-8321
+     */
+    type MaxRandaoCommitmentRegistrations: Unsigned + Clone + Sync + Send + Debug + PartialEq;
 
     fn default_spec() -> ChainSpec;
 
@@ -557,6 +561,7 @@ impl EthSpec for MainnetEthSpec {
     type MaxBuilderDepositRequestsPerPayload = U64;
     type MaxBuilderExitRequestsPerPayload = U16;
     type InclusionListCommitteeSize = U16;
+    type MaxRandaoCommitmentRegistrations = U128;
 
     fn default_spec() -> ChainSpec {
         ChainSpec::mainnet()
@@ -655,7 +660,8 @@ impl EthSpec for MinimalEthSpec {
         MaxPayloadAttestations,
         MaxBuilderDepositRequestsPerPayload,
         MaxBuilderExitRequestsPerPayload,
-        InclusionListCommitteeSize
+        InclusionListCommitteeSize,
+        MaxRandaoCommitmentRegistrations
     });
 
     fn default_spec() -> ChainSpec {
@@ -754,6 +760,7 @@ impl EthSpec for GnosisEthSpec {
     type MaxBuilderDepositRequestsPerPayload = U64;
     type MaxBuilderExitRequestsPerPayload = U16;
     type InclusionListCommitteeSize = U16;
+    type MaxRandaoCommitmentRegistrations = U128;
 
     fn default_spec() -> ChainSpec {
         ChainSpec::gnosis()
