@@ -24,6 +24,7 @@ pub fn upgrade_state_to_heze<E: EthSpec>(
 ) -> Result<BeaconState<E>, Error> {
     let epoch = pre_state.current_epoch();
     let pre = pre_state.as_gloas_mut()?;
+    let validator_count = pre.validators.len();
     // Where possible, use something like `mem::take` to move fields from behind the &mut
     // reference. For other fields that don't have a good default value, use `clone`.
     //
@@ -44,7 +45,7 @@ pub fn upgrade_state_to_heze<E: EthSpec>(
         block_roots: pre.block_roots.clone(),
         state_roots: pre.state_roots.clone(),
         historical_roots: mem::take(&mut pre.historical_roots),
-        // Eth1 fields were removed from the state in Heze (EIP-8321).
+        // Heze (EIP-8015) removes the Eth1 bridge fields.
         // Registry
         validators: mem::take(&mut pre.validators),
         balances: mem::take(&mut pre.balances),
@@ -90,7 +91,7 @@ pub fn upgrade_state_to_heze<E: EthSpec>(
         next_withdrawal_index: pre.next_withdrawal_index,
         next_withdrawal_validator_index: pre.next_withdrawal_validator_index,
         historical_summaries: pre.historical_summaries.clone(),
-        // Electra (`deposit_requests_start_index` was removed in Heze, EIP-8321)
+        // Electra (`deposit_requests_start_index` was removed in Heze, EIP-8015)
         deposit_balance_to_consume: pre.deposit_balance_to_consume,
         exit_balance_to_consume: pre.exit_balance_to_consume,
         earliest_exit_epoch: pre.earliest_exit_epoch,
@@ -113,7 +114,7 @@ pub fn upgrade_state_to_heze<E: EthSpec>(
         // `randao_commitments` has exactly one entry per validator.
         randao_commitments: ProgressiveList::try_from_iter(std::iter::repeat_n(
             types::consts::heze::UNSET_RANDAO_COMMITMENT,
-            pre.validators.len(),
+            validator_count,
         ))?,
         pending_randao_commitments: ProgressiveList::empty(),
         // Caches

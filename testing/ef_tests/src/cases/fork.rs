@@ -1,13 +1,16 @@
 use super::*;
 use crate::case_result::compare_beacon_state_results_without_caches;
-use crate::decode::{ssz_decode_state, yaml_decode_file};
+use crate::decode::{ssz_decode_file, ssz_decode_state, yaml_decode_file};
 use serde::Deserialize;
 use state_processing::GloasVerificationContext;
 use state_processing::upgrade::{
     upgrade_to_altair, upgrade_to_bellatrix, upgrade_to_capella, upgrade_to_deneb,
-    upgrade_to_electra, upgrade_to_fulu, upgrade_to_gloas, upgrade_to_heze,
+    upgrade_to_eip8321, upgrade_to_electra, upgrade_to_fulu, upgrade_to_gloas, upgrade_to_heze,
 };
 use types::BeaconState;
+
+mod pre_eip8321;
+use pre_eip8321::PreEip8321State;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Metadata {
@@ -38,13 +41,14 @@ impl<E: EthSpec> LoadCase for ForkTest<E> {
             assert_eq!(metadata.fork_name(), fork_name);
         }
 
-        let pre_fork = if is_eip8321 {
-            ForkName::Heze
+        let pre = if is_eip8321 {
+            ssz_decode_file::<PreEip8321State<E>>(&path.join("pre.ssz_snappy"))?
+                .into_feature_state()
         } else {
-            fork_name.previous_fork().unwrap_or(ForkName::Base)
+            let pre_fork = fork_name.previous_fork().unwrap_or(ForkName::Base);
+            let pre_spec = &pre_fork.make_genesis_spec(E::default_spec());
+            ssz_decode_state(&path.join("pre.ssz_snappy"), pre_spec)?
         };
-        let pre_spec = &pre_fork.make_genesis_spec(E::default_spec());
-        let pre = ssz_decode_state(&path.join("pre.ssz_snappy"), pre_spec)?;
 
         // Decode post-state with target fork.
         let post_spec = &fork_name.make_genesis_spec(E::default_spec());
@@ -74,23 +78,37 @@ impl<E: EthSpec> Case for ForkTest<E> {
         let mut expected = Some(self.post.clone());
         let spec = &fork_name.make_genesis_spec(E::default_spec());
 
-        let mut result = match fork_name {
-            ForkName::Base => panic!("phase0 not supported"),
-            ForkName::Altair => upgrade_to_altair(&mut result_state, spec).map(|_| result_state),
-            ForkName::Bellatrix => {
-                upgrade_to_bellatrix(&mut result_state, spec).map(|_| result_state)
+        let mut result = if self.metadata.fork == "eip8321" {
+            // The local feature configs use 0xe83210 followed by the network byte:
+            // mainnet 0xe8321000, minimal 0xe8321001.
+            let [_, _, _, network] = spec.heze_fork_version;
+            let feature_version = [0xe8, 0x32, 0x10, network];
+            upgrade_to_eip8321(&mut result_state, feature_version).map(|_| result_state)
+        } else {
+            match fork_name {
+                ForkName::Base => panic!("phase0 not supported"),
+                ForkName::Altair => {
+                    upgrade_to_altair(&mut result_state, spec).map(|_| result_state)
+                }
+                ForkName::Bellatrix => {
+                    upgrade_to_bellatrix(&mut result_state, spec).map(|_| result_state)
+                }
+                ForkName::Capella => {
+                    upgrade_to_capella(&mut result_state, spec).map(|_| result_state)
+                }
+                ForkName::Deneb => upgrade_to_deneb(&mut result_state, spec).map(|_| result_state),
+                ForkName::Electra => {
+                    upgrade_to_electra(&mut result_state, spec).map(|_| result_state)
+                }
+                ForkName::Fulu => upgrade_to_fulu(&mut result_state, spec).map(|_| result_state),
+                ForkName::Gloas => upgrade_to_gloas(
+                    &mut result_state,
+                    GloasVerificationContext::FullVerification,
+                    spec,
+                )
+                .map(|_| result_state),
+                ForkName::Heze => upgrade_to_heze(&mut result_state, spec).map(|_| result_state),
             }
-            ForkName::Capella => upgrade_to_capella(&mut result_state, spec).map(|_| result_state),
-            ForkName::Deneb => upgrade_to_deneb(&mut result_state, spec).map(|_| result_state),
-            ForkName::Electra => upgrade_to_electra(&mut result_state, spec).map(|_| result_state),
-            ForkName::Fulu => upgrade_to_fulu(&mut result_state, spec).map(|_| result_state),
-            ForkName::Gloas => upgrade_to_gloas(
-                &mut result_state,
-                GloasVerificationContext::FullVerification,
-                spec,
-            )
-            .map(|_| result_state),
-            ForkName::Heze => upgrade_to_heze(&mut result_state, spec).map(|_| result_state),
         };
 
         compare_beacon_state_results_without_caches(&mut result, &mut expected)
