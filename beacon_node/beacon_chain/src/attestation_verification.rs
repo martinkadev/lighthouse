@@ -42,7 +42,7 @@ use crate::{
 };
 use bls::verify_signature_sets;
 use itertools::Itertools;
-use proto_array::Block as ProtoBlock;
+use proto_array::{Block as ProtoBlock, ExecutionVerdict};
 use slot_clock::SlotClock;
 use state_processing::{
     common::{
@@ -183,6 +183,12 @@ pub enum Error {
     /// The attestation may be valid once the payload envelope is retrieved; it's unclear if the
     /// attestation is valid or not, so it is ignored (not penalized) pending the envelope.
     UnknownPayloadEnvelope { beacon_block_root: Hash256 },
+    /// The referenced payload envelope was received but is awaiting EL validation.
+    /// Ignore the attestation without penalizing the peer until the verdict is available.
+    ExecutionPayloadNotVerified { beacon_block_root: Hash256 },
+    /// The attestation claims a payload that the EL has declared invalid.
+    /// Reject the attestation and penalize the peer for sending an invalid message.
+    ExecutionPayloadInvalid { beacon_block_root: Hash256 },
     /// The `attestation.data.beacon_block_root` block is from before the finalized checkpoint.
     ///
     /// ## Peer scoring
@@ -610,27 +616,20 @@ impl<'a, T: BeaconChainTypes> IndexedAggregatedAttestation<'a, T> {
         // attestation and do not delay consideration for later.
         let head_block = verify_head_block_is_known(chain, attestation.data(), None)?;
 
-        // [New in Gloas]: If the attested block is from the same slot as the attestation,
-        // index must be 0.
-        if fork_name.gloas_enabled()
-            && head_block.slot == attestation.data().slot
-            && attestation.data().index != 0
-        {
-            return Err(Error::CommitteeIndexNonZero(
-                attestation.data().index as usize,
-            ));
-        }
-
-        // [New in Gloas]: `index == 1` claims the block's execution payload is present. Ignore the
-        // attestation until we have seen the block's payload envelope, so it can be re-processed
-        // (and the envelope retrieved) once the payload is received.
-        if fork_name.gloas_enabled()
-            && attestation.data().index == 1
-            && !head_block.payload_received
-        {
-            return Err(Error::UnknownPayloadEnvelope {
-                beacon_block_root: attestation.data().beacon_block_root,
-            });
+        if fork_name.gloas_enabled() {
+            verify_attestation_payload_status(
+                attestation.data(),
+                head_block.slot,
+                head_block.payload_received,
+                || {
+                    chain
+                        .canonical_head
+                        .fork_choice_read_lock()
+                        .get_block_execution_status_assuming_full(&head_block.root)
+                        .map_err(BeaconChainError::from)
+                        .map_err(Error::from)
+                },
+            )?;
         }
 
         // Check the attestation target root is consistent with the head root.
@@ -950,25 +949,20 @@ impl<'a, T: BeaconChainTypes> IndexedUnaggregatedAttestation<'a, T> {
             chain.config.import_max_skip_slots,
         )?;
 
-        // [New in Gloas]: If the attested block is from the same slot as the attestation,
-        // index must be 0.
-        if fork_name.gloas_enabled()
-            && head_block.slot == attestation.data.slot
-            && attestation.data.index != 0
-        {
-            return Err(Error::CommitteeIndexNonZero(
-                attestation.data.index as usize,
-            ));
-        }
-
-        // [New in Gloas]: `index == 1` claims the block's execution payload is present. Ignore the
-        // attestation until we have seen the block's payload envelope, so it can be re-processed
-        // (and the envelope retrieved) once the payload is received.
-        if fork_name.gloas_enabled() && attestation.data.index == 1 && !head_block.payload_received
-        {
-            return Err(Error::UnknownPayloadEnvelope {
-                beacon_block_root: attestation.data.beacon_block_root,
-            });
+        if fork_name.gloas_enabled() {
+            verify_attestation_payload_status(
+                &attestation.data,
+                head_block.slot,
+                head_block.payload_received,
+                || {
+                    chain
+                        .canonical_head
+                        .fork_choice_read_lock()
+                        .get_block_execution_status_assuming_full(&head_block.root)
+                        .map_err(BeaconChainError::from)
+                        .map_err(Error::from)
+                },
+            )?;
         }
 
         // Check the attestation target root is consistent with the head root.
@@ -1656,4 +1650,131 @@ where
                 })
             }))
     })?
+}
+
+/// Verify the payload claimed by a Gloas attestation, shared by aggregates and single attestations.
+/// Query the FULL node only for payload-present votes; EMPTY votes may still be valid when
+/// the block's own execution payload is optimistic or invalid.
+fn verify_attestation_payload_status(
+    data: &AttestationData,
+    block_slot: Slot,
+    payload_received: bool,
+    get_payload_status: impl FnOnce() -> Result<Option<ExecutionVerdict>, Error>,
+) -> Result<(), Error> {
+    if block_slot == data.slot && data.index != 0 {
+        return Err(Error::CommitteeIndexNonZero(data.index as usize));
+    }
+    if data.index != 1 {
+        return Ok(());
+    }
+    let beacon_block_root = data.beacon_block_root;
+    if !payload_received {
+        return Err(Error::UnknownPayloadEnvelope { beacon_block_root });
+    }
+    match get_payload_status()? {
+        Some(ExecutionVerdict::Valid) => Ok(()),
+        Some(ExecutionVerdict::Optimistic) => {
+            Err(Error::ExecutionPayloadNotVerified { beacon_block_root })
+        }
+        Some(ExecutionVerdict::Invalid) => {
+            Err(Error::ExecutionPayloadInvalid { beacon_block_root })
+        }
+        None => Err(Error::HeadBlockFinalized { beacon_block_root }),
+    }
+}
+
+#[cfg(test)]
+mod attestation_payload_status_tests {
+    use super::*;
+
+    fn data() -> AttestationData {
+        AttestationData {
+            slot: Slot::new(2),
+            index: 1,
+            beacon_block_root: Hash256::repeat_byte(42),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn attestation_payload_valid_is_accepted() {
+        assert!(
+            verify_attestation_payload_status(&data(), Slot::new(1), true, || Ok(Some(
+                ExecutionVerdict::Valid
+            )))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn attestation_payload_optimistic_is_not_verified() {
+        assert!(
+            matches!(verify_attestation_payload_status(&data(), Slot::new(1), true,
+            || Ok(Some(ExecutionVerdict::Optimistic))),
+            Err(Error::ExecutionPayloadNotVerified { beacon_block_root })
+                if beacon_block_root == data().beacon_block_root)
+        );
+    }
+
+    #[test]
+    fn attestation_payload_invalid_is_rejected() {
+        assert!(
+            matches!(verify_attestation_payload_status(&data(), Slot::new(1), true,
+            || Ok(Some(ExecutionVerdict::Invalid))),
+            Err(Error::ExecutionPayloadInvalid { beacon_block_root })
+                if beacon_block_root == data().beacon_block_root)
+        );
+    }
+
+    #[test]
+    fn attestation_payload_unseen_is_checked_before_execution_status() {
+        assert!(matches!(
+            verify_attestation_payload_status(&data(), Slot::new(1), false, || panic!(
+                "unseen envelopes must not query the execution verdict"
+            )),
+            Err(Error::UnknownPayloadEnvelope { .. })
+        ));
+    }
+
+    #[test]
+    fn attestation_payload_empty_vote_does_not_require_execution_status() {
+        let mut data = data();
+        data.index = 0;
+        assert!(
+            verify_attestation_payload_status(&data, Slot::new(1), true, || panic!(
+                "EMPTY votes must not query the block's FULL execution verdict"
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn attestation_payload_same_slot_rejected_before_execution_status() {
+        assert!(matches!(
+            verify_attestation_payload_status(&data(), Slot::new(2), true, || panic!(
+                "same-slot payload-present votes must fail before the verdict lookup"
+            )),
+            Err(Error::CommitteeIndexNonZero(1))
+        ));
+    }
+
+    #[test]
+    fn attestation_payload_finalized_during_verification_is_ignored() {
+        assert!(matches!(
+            verify_attestation_payload_status(&data(), Slot::new(1), true, || Ok(None)),
+            Err(Error::HeadBlockFinalized { .. })
+        ));
+    }
+
+    #[test]
+    fn attestation_payload_lookup_errors_are_propagated() {
+        assert!(matches!(
+            verify_attestation_payload_status(&data(), Slot::new(1), true, || Err(
+                Error::UnknownHeadBlock {
+                    beacon_block_root: data().beacon_block_root
+                }
+            )),
+            Err(Error::UnknownHeadBlock { .. })
+        ));
+    }
 }

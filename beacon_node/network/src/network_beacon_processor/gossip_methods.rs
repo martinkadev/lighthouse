@@ -2976,6 +2976,27 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
 
                 return;
             }
+            AttnError::ExecutionPayloadNotVerified { beacon_block_root } => {
+                debug!(
+                    %peer_id,
+                    block = ?beacon_block_root,
+                    "Ignored attestation to optimistic payload"
+                );
+                self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Ignore);
+            }
+            AttnError::ExecutionPayloadInvalid { beacon_block_root } => {
+                debug!(
+                    %peer_id,
+                    block = ?beacon_block_root,
+                    "Rejected attestation to invalid payload"
+                );
+                self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Reject);
+                self.gossip_penalize_peer(
+                    peer_id,
+                    PeerAction::LowToleranceError,
+                    "attn_invalid_payload",
+                );
+            }
             AttnError::UnknownPayloadEnvelope { beacon_block_root } => {
                 trace!(
                     %peer_id,
