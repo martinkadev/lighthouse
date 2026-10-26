@@ -610,4 +610,61 @@ mod tests {
             Some(&commitment)
         );
     }
+    #[test]
+    fn hash_chain_reveal_consumes_one_link_per_block() {
+        let hash_link = |reveal: Hash256| {
+            let mut bytes = HASH_CHAIN_RANDAO_DST.to_vec();
+            bytes.extend_from_slice(reveal.as_slice());
+            Hash256::from_slice(blake3::hash(&bytes).as_bytes())
+        };
+        let second_reveal = Hash256::repeat_byte(42);
+        let first_reveal = hash_link(second_reveal);
+        let (mut state, spec) = randao_fixture(hash_link(first_reveal));
+        let mut block = BeaconBlock::<MinimalEthSpec>::empty(&spec);
+        *block.body_mut().randao_reveal_mut() = Signature::infinity().unwrap();
+
+        for (slot, reveal) in [(Slot::new(0), first_reveal), (Slot::new(1), second_reveal)] {
+            *state.slot_mut() = slot;
+            *block.slot_mut() = slot;
+            *block.body_mut().hash_chain_reveal_mut().unwrap() = reveal;
+            let mut mix_preimage = state
+                .get_randao_mix(state.current_epoch())
+                .unwrap()
+                .as_slice()
+                .to_vec();
+            mix_preimage.extend_from_slice(reveal.as_slice());
+            let expected_mix = Hash256::from_slice(blake3::hash(&mix_preimage).as_bytes());
+            let mut ctxt = ConsensusContext::new(slot).set_proposer_index(0);
+            process_randao(
+                &mut state,
+                block.to_ref(),
+                VerifySignatures::False,
+                &mut ctxt,
+                &spec,
+            )
+            .unwrap();
+            assert_eq!(state.randao_commitments().unwrap().get(0), Some(&reveal));
+            assert_eq!(
+                state.get_randao_mix(state.current_epoch()).unwrap(),
+                &expected_mix
+            );
+
+            // Replaying a consumed link cannot advance the chain or change the mix.
+            assert!(
+                process_randao(
+                    &mut state,
+                    block.to_ref(),
+                    VerifySignatures::False,
+                    &mut ctxt,
+                    &spec
+                )
+                .is_err()
+            );
+            assert_eq!(state.randao_commitments().unwrap().get(0), Some(&reveal));
+            assert_eq!(
+                state.get_randao_mix(state.current_epoch()).unwrap(),
+                &expected_mix
+            );
+        }
+    }
 }
