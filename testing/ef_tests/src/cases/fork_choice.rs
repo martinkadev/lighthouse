@@ -682,7 +682,14 @@ impl<E: EthSpec> Tester<E> {
             .keypairs(vec![])
             .chain_config(ChainConfig {
                 archive: true,
-                fast_confirmation: FastConfirmationMode::Enabled,
+                // Only the dedicated FCR runner supplies confirmation updates. Ordinary
+                // fork-choice fixtures can prune the stale confirmed root while FCR's
+                // spec-test mode suppresses the updates that would move it forward.
+                fast_confirmation: if case.fast_confirmation {
+                    FastConfirmationMode::Enabled
+                } else {
+                    FastConfirmationMode::Disabled
+                },
                 ..ChainConfig::default()
             })
             .genesis_state_ephemeral_store(case.anchor_state.clone())
