@@ -407,6 +407,13 @@ pub fn process_epoch_single_pass<E: EthSpec>(
                 state
                     .get_balance_mut(validator_index)?
                     .safe_add_assign(deposit_data.amount)?;
+            } else if fork_name.heze_enabled()
+                && deposit_data.withdrawal_credentials.as_slice().first()
+                    == Some(&spec.bls_withdrawal_prefix_byte)
+            {
+                // Heze (EIP-8365) forbids creating validators with BLS withdrawal credentials.
+                // Existing validators can still receive top-ups via the branch above.
+                continue;
             } else if is_valid_deposit_signature(&deposit_data, spec).is_ok() {
                 // Apply the new deposit to the state
                 let validator_index = state.add_validator_to_registry(
