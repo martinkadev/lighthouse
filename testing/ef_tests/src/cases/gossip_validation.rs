@@ -1,7 +1,9 @@
 use super::common::testing_spec_for_case;
 use super::*;
 use crate::bls_setting::BlsSetting;
-use crate::decode::{ssz_decode_file, ssz_decode_file_with, ssz_decode_state, yaml_decode_file};
+use crate::decode::{
+    snappy_decode_file, ssz_decode_file, ssz_decode_file_with, ssz_decode_state, yaml_decode_file,
+};
 use crate::type_name::TypeName;
 use ::fork_choice::{InvalidationOperation, PayloadVerificationStatus};
 use beacon_chain::block_verification_types::LookupBlock;
@@ -435,7 +437,7 @@ impl<E: EthSpec> GossipTester<E> {
                 peer_id,
             )?,
             Topic::BeaconBlock => {
-                self.process_beacon_block(path, message_meta, message_id.clone(), peer_id)?
+                return self.process_beacon_block(path, message_meta, message_id, peer_id);
             }
             Topic::VoluntaryExit => {
                 self.process_voluntary_exit(path, message_meta, message_id.clone(), peer_id)?
@@ -525,13 +527,19 @@ impl<E: EthSpec> GossipTester<E> {
         message_meta: &MessageMeta,
         message_id: MessageId,
         peer_id: PeerId,
-    ) -> Result<(), Error> {
-        let block = Arc::new(load_beacon_block(path, &message_meta.message, &self.spec)?);
+    ) -> Result<MessageAcceptance, Error> {
+        // Missing or corrupt Snappy files are fixture errors. Invalid SSZ messages are
+        // rejected before gossip processing, just as they are by the network decoder.
+        let bytes = snappy_decode_file(&path.join(format!("{}.ssz_snappy", message_meta.message)))?;
+        let block = match decode_gossip_block(&bytes, &self.spec) {
+            Ok(block) => Arc::new(block),
+            Err(outcome) => return Ok(outcome),
+        };
         let time_ms = self.message_time_ms(message_meta)?;
         let seen_duration = self.set_time_ms(time_ms)?;
 
         let process_fn = Box::pin(self.network_beacon_processor.clone().process_gossip_block(
-            message_id,
+            message_id.clone(),
             peer_id,
             Client::default(),
             block,
@@ -541,7 +549,7 @@ impl<E: EthSpec> GossipTester<E> {
         ));
 
         self.block_on_dangerous(process_fn)?;
-        Ok(())
+        self.validation_result(&message_id, &peer_id)
     }
 
     fn process_voluntary_exit(
@@ -994,13 +1002,8 @@ impl<E: EthSpec> GossipValidation<E> {
     ) -> Result<HashMap<String, SignedBeaconBlock<E>>, Error> {
         let mut block_names = HashSet::new();
         block_names.extend(self.meta.blocks.iter().map(|block| block.block.clone()));
-        block_names.extend(
-            self.meta
-                .messages
-                .iter()
-                .filter(|_| self.meta.topic == Topic::BeaconBlock)
-                .map(|message| message.message.clone()),
-        );
+        // Decode gossip messages when they are validated: intentionally oversized or
+        // malformed messages must not prevent construction of the valid setup store.
         if let Some(FinalizedCheckpoint::Block { block, .. }) = &self.meta.finalized_checkpoint {
             block_names.insert(block.clone());
         }
@@ -1170,5 +1173,49 @@ mod gossip_setup_payload_tests {
         let block: SetupBlock = yaml_serde::from_str("{block: block_0}").unwrap();
         assert!(block.payload.is_none());
         assert!(block.payload_status.is_none());
+    }
+}
+
+fn decode_gossip_block<E: EthSpec>(
+    bytes: &[u8],
+    spec: &ChainSpec,
+) -> Result<SignedBeaconBlock<E>, MessageAcceptance> {
+    SignedBeaconBlock::from_ssz_bytes(bytes, spec).map_err(|_| MessageAcceptance::Reject)
+}
+
+#[cfg(test)]
+mod block_gossip_decode_tests {
+    use super::*;
+    use ssz::Encode;
+    use types::MinimalEthSpec;
+
+    #[test]
+    fn block_gossip_valid_ssz_is_decoded() {
+        let spec = ForkName::Heze.make_genesis_spec(MinimalEthSpec::default_spec());
+        let block = SignedBeaconBlock::from_block(
+            BeaconBlock::<MinimalEthSpec>::empty(&spec),
+            Signature::empty(),
+        );
+        let decoded = decode_gossip_block::<MinimalEthSpec>(&block.as_ssz_bytes(), &spec).unwrap();
+        assert_eq!(decoded, block);
+    }
+
+    #[test]
+    fn block_gossip_invalid_ssz_is_rejected() {
+        let spec = ForkName::Heze.make_genesis_spec(MinimalEthSpec::default_spec());
+        assert!(matches!(
+            decode_gossip_block::<MinimalEthSpec>(&[], &spec),
+            Err(MessageAcceptance::Reject)
+        ));
+        let block = SignedBeaconBlock::from_block(
+            BeaconBlock::<MinimalEthSpec>::empty(&spec),
+            Signature::empty(),
+        );
+        let mut bytes = block.as_ssz_bytes();
+        bytes.pop();
+        assert!(matches!(
+            decode_gossip_block::<MinimalEthSpec>(&bytes, &spec),
+            Err(MessageAcceptance::Reject)
+        ));
     }
 }

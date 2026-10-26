@@ -80,7 +80,7 @@ use safe_arith::ArithError;
 use slot_clock::SlotClock;
 use ssz::Encode;
 use ssz_derive::{Decode, Encode};
-use state_processing::per_block_processing::errors::IntoWithIndex;
+use state_processing::per_block_processing::errors::{ExecutionPayloadBidInvalid, IntoWithIndex};
 use state_processing::per_block_processing::{
     process_operations::verify_operation_list_lengths, verify_execution_request_list_lengths,
 };
@@ -1102,6 +1102,24 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
                 block: block.message().proposer_index(),
                 local_shuffling: expected_proposer as u64,
             });
+        }
+
+        if let Ok(bid) = block.message().body().signed_execution_payload_bid() {
+            let PayloadBlockHash::Hash(parent_payload_hash) = parent_block.block_hash() else {
+                return Err(BlockError::InternalError(
+                    "Gloas block has a parent without an execution block hash".into(),
+                ));
+            };
+            // For an EMPTY Gloas parent, its bid's parent hash is the execution head
+            // recorded in its post-state. A pre-Gloas parent executed its embedded payload.
+            let parent_execution_head = parent_block
+                .execution_payload_parent_hash
+                .unwrap_or(parent_payload_hash);
+            verify_bid_parent_execution_head(
+                bid.message().parent_block_hash(),
+                parent_payload_hash,
+                parent_execution_head,
+            )?;
         }
 
         // [New in Gloas]: Skip payload validation checks. The payload now arrives separately
@@ -2323,5 +2341,56 @@ fn write_block<E: EthSpec>(block: &SignedBeaconBlock<E>, root: Hash256) {
                 "Failed to log block"
             ),
         }
+    }
+}
+
+/// A child can build on the parent's FULL payload, or on the execution head of its EMPTY node.
+fn verify_bid_parent_execution_head(
+    bid_parent_hash: ExecutionBlockHash,
+    parent_payload_hash: ExecutionBlockHash,
+    parent_execution_head: ExecutionBlockHash,
+) -> Result<(), BlockError> {
+    if bid_parent_hash != parent_payload_hash && bid_parent_hash != parent_execution_head {
+        return Err(BlockError::PerBlockProcessingError(
+            ExecutionPayloadBidInvalid::ParentBlockHashMismatch {
+                state_block_hash: parent_execution_head,
+                bid_parent_hash,
+            }
+            .into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod block_gossip_parent_tests {
+    use super::*;
+
+    fn hash(byte: u8) -> ExecutionBlockHash {
+        ExecutionBlockHash::from(Hash256::repeat_byte(byte))
+    }
+
+    #[test]
+    fn block_gossip_full_parent_accepts_its_payload_hash() {
+        assert!(verify_bid_parent_execution_head(hash(1), hash(1), hash(2)).is_ok());
+    }
+
+    #[test]
+    fn block_gossip_empty_parent_accepts_its_execution_head() {
+        assert!(verify_bid_parent_execution_head(hash(2), hash(1), hash(2)).is_ok());
+    }
+
+    #[test]
+    fn block_gossip_empty_parent_rejects_unrelated_execution_hash() {
+        assert!(
+            matches!(verify_bid_parent_execution_head(hash(3), hash(1), hash(2)),
+            Err(BlockError::PerBlockProcessingError(
+                BlockProcessingError::ExecutionPayloadBidInvalid {
+                    reason: ExecutionPayloadBidInvalid::ParentBlockHashMismatch {
+                        state_block_hash, bid_parent_hash,
+                    },
+                }
+            )) if state_block_hash == hash(2) && bid_parent_hash == hash(3))
+        );
     }
 }
