@@ -1,3 +1,4 @@
+use super::common::testing_spec_for_case;
 use super::*;
 use crate::decode::{ssz_decode_file, ssz_decode_state, yaml_decode_file};
 use serde::Deserialize;
@@ -73,7 +74,7 @@ impl<E: EthSpec> Case for GenericMerkleProofValidity<E> {
 
 impl<E: EthSpec> LoadCase for BeaconStateMerkleProofValidity<E> {
     fn load_from_dir(path: &Path, fork_name: ForkName) -> Result<Self, Error> {
-        let spec = &testing_spec::<E>(fork_name);
+        let spec = &testing_spec_for_case::<E>(path, fork_name)?;
         let state = ssz_decode_state(&path.join("object.ssz_snappy"), spec)?;
         let merkle_proof = yaml_decode_file(&path.join("proof.yaml"))?;
         // Metadata does not exist in these tests but it is left like this just in case.

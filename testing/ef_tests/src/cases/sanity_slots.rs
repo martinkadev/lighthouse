@@ -1,3 +1,4 @@
+use super::common::testing_spec_for_case;
 use super::*;
 use crate::bls_setting::BlsSetting;
 use crate::case_result::compare_beacon_state_results_without_caches;
@@ -15,6 +16,8 @@ pub struct Metadata {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(bound = "E: EthSpec")]
 pub struct SanitySlots<E: EthSpec> {
+    #[serde(skip)]
+    path: PathBuf,
     pub metadata: Metadata,
     pub pre: BeaconState<E>,
     pub slots: u64,
@@ -23,7 +26,7 @@ pub struct SanitySlots<E: EthSpec> {
 
 impl<E: EthSpec> LoadCase for SanitySlots<E> {
     fn load_from_dir(path: &Path, fork_name: ForkName) -> Result<Self, Error> {
-        let spec = &testing_spec::<E>(fork_name);
+        let spec = &testing_spec_for_case::<E>(path, fork_name)?;
         let metadata_path = path.join("meta.yaml");
         let metadata: Metadata = if metadata_path.is_file() {
             yaml_decode_file(&metadata_path)?
@@ -40,6 +43,7 @@ impl<E: EthSpec> LoadCase for SanitySlots<E> {
         };
 
         Ok(Self {
+            path: path.to_path_buf(),
             metadata,
             pre,
             slots,
@@ -58,7 +62,7 @@ impl<E: EthSpec> Case for SanitySlots<E> {
 
         let mut state = self.pre.clone();
         let mut expected = self.post.clone();
-        let spec = &testing_spec::<E>(fork_name);
+        let spec = &testing_spec_for_case::<E>(&self.path, fork_name)?;
 
         // Processing requires the epoch cache.
         state.build_caches(spec).unwrap();

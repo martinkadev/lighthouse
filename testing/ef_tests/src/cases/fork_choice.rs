@@ -212,6 +212,7 @@ pub struct Meta {
 
 #[derive(Debug)]
 pub struct ForkChoiceTest<E: EthSpec> {
+    path: PathBuf,
     pub description: String,
     pub config: Option<types::Config>,
     /// True when the case comes from the `fast_confirmation` runner.
@@ -246,7 +247,7 @@ impl<E: EthSpec> LoadCase for ForkChoiceTest<E> {
             .iter()
             .any(|component| component == "fast_confirmation");
         let config = load_config(path)?;
-        let spec = &testing_spec_with_config::<E>(fork_name, config.as_ref())?;
+        let spec = &testing_spec_with_config::<E>(path, fork_name, config.as_ref())?;
 
         #[allow(clippy::type_complexity)]
         let steps: Vec<
@@ -420,6 +421,7 @@ impl<E: EthSpec> LoadCase for ForkChoiceTest<E> {
         }
 
         Ok(Self {
+            path: path.to_path_buf(),
             description,
             config,
             fast_confirmation,
@@ -455,7 +457,7 @@ impl<E: EthSpec> Case for ForkChoiceTest<E> {
             return Err(Error::SkippedKnownFailure);
         }
 
-        let spec = testing_spec_with_config::<E>(fork_name, self.config.as_ref())?;
+        let spec = testing_spec_with_config::<E>(&self.path, fork_name, self.config.as_ref())?;
         let tester = Tester::new(self, spec)?;
 
         for step in &self.steps {

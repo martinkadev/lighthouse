@@ -93,6 +93,7 @@ pub struct ParentExecutionPayloadBlock<E: EthSpec> {
 
 #[derive(Debug, Clone)]
 pub struct Operations<E: EthSpec, O: Operation<E>> {
+    path: PathBuf,
     metadata: Metadata,
     config: Option<types::Config>,
     execution_metadata: Option<ExecutionMetadata>,
@@ -930,7 +931,7 @@ impl<E: EthSpec> Operation<E> for PayloadAttestation<E> {
 impl<E: EthSpec, O: Operation<E>> LoadCase for Operations<E, O> {
     fn load_from_dir(path: &Path, fork_name: ForkName) -> Result<Self, Error> {
         let config = load_config(path)?;
-        let spec = &testing_spec_with_config::<E>(fork_name, config.as_ref())?;
+        let spec = &testing_spec_with_config::<E>(path, fork_name, config.as_ref())?;
         let metadata_path = path.join("meta.yaml");
         let metadata: Metadata = if metadata_path.is_file() {
             yaml_decode_file(&metadata_path)?
@@ -965,6 +966,7 @@ impl<E: EthSpec, O: Operation<E>> LoadCase for Operations<E, O> {
         };
 
         Ok(Self {
+            path: path.to_path_buf(),
             metadata,
             config,
             execution_metadata,
@@ -1015,7 +1017,7 @@ impl<E: EthSpec, O: Operation<E>> Case for Operations<E, O> {
             Ok(operation) => operation,
             Err(error) => return compare_result::<BeaconState<E>, _>(&Err(error), &self.post),
         };
-        let spec = &testing_spec_with_config::<E>(fork_name, self.config.as_ref())?;
+        let spec = &testing_spec_with_config::<E>(&self.path, fork_name, self.config.as_ref())?;
 
         let mut pre_state = self.pre.clone();
         // Processing requires the committee caches.

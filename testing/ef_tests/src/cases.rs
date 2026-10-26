@@ -108,6 +108,24 @@ impl FeatureName {
             FeatureName::Eip8321 => ForkName::Heze,
         }
     }
+
+    /// Default experimental version for the selected preset, independent of case overrides.
+    pub fn fork_version<E: EthSpec>(&self) -> [u8; 4] {
+        match self {
+            FeatureName::Eip8321 => {
+                let [_, _, _, network] = E::default_spec().heze_fork_version;
+                [0xe8, 0x32, 0x10, network]
+            }
+        }
+    }
+
+    /// Apply feature versioning to its existing runtime fork representation.
+    pub fn apply_fork_version<E: EthSpec>(&self, spec: &mut ChainSpec, version: Option<[u8; 4]>) {
+        let version = version.unwrap_or_else(|| self.fork_version::<E>());
+        match self {
+            FeatureName::Eip8321 => spec.heze_fork_version = version,
+        }
+    }
 }
 
 impl Display for FeatureName {

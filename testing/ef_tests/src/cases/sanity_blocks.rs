@@ -19,6 +19,7 @@ pub struct Metadata {
 
 #[derive(Debug, Clone)]
 pub struct SanityBlocks<E: EthSpec> {
+    path: PathBuf,
     pub case_name: String,
     pub metadata: Metadata,
     pub config: Option<types::Config>,
@@ -30,7 +31,7 @@ pub struct SanityBlocks<E: EthSpec> {
 impl<E: EthSpec> LoadCase for SanityBlocks<E> {
     fn load_from_dir(path: &Path, fork_name: ForkName) -> Result<Self, Error> {
         let config = load_config(path)?;
-        let spec = &testing_spec_with_config::<E>(fork_name, config.as_ref())?;
+        let spec = &testing_spec_with_config::<E>(path, fork_name, config.as_ref())?;
         let metadata: Metadata = yaml_decode_file(&path.join("meta.yaml"))?;
         let pre = ssz_decode_state(&path.join("pre.ssz_snappy"), spec)?;
         let blocks = (0..metadata.blocks_count)
@@ -54,6 +55,7 @@ impl<E: EthSpec> LoadCase for SanityBlocks<E> {
             .unwrap_or_default();
 
         Ok(Self {
+            path: path.to_path_buf(),
             case_name,
             metadata,
             config,
@@ -84,7 +86,7 @@ impl<E: EthSpec> Case for SanityBlocks<E> {
 
         let mut bulk_state = self.pre.clone();
         let mut expected = self.post.clone();
-        let spec = &testing_spec_with_config::<E>(fork_name, self.config.as_ref())?;
+        let spec = &testing_spec_with_config::<E>(&self.path, fork_name, self.config.as_ref())?;
 
         // Processing requires the epoch cache.
         bulk_state.build_caches(spec).unwrap();

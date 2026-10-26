@@ -1,3 +1,4 @@
+use super::common::testing_spec_for_case;
 use super::*;
 use crate::case_result::compare_result_detailed;
 use crate::decode::{ssz_decode_file, ssz_decode_state, yaml_decode_file};
@@ -69,7 +70,7 @@ fn load_optional_deltas_file(path: &Path) -> Result<Option<Deltas>, Error> {
 
 impl<E: EthSpec> LoadCase for RewardsTest<E> {
     fn load_from_dir(path: &Path, fork_name: ForkName) -> Result<Self, Error> {
-        let spec = &testing_spec::<E>(fork_name);
+        let spec = &testing_spec_for_case::<E>(path, fork_name)?;
         let metadata_path = path.join("meta.yaml");
         let metadata: Metadata = if metadata_path.is_file() {
             yaml_decode_file(&metadata_path)?
@@ -113,7 +114,7 @@ impl<E: EthSpec> Case for RewardsTest<E> {
 
     fn result(&self, _case_index: usize, fork_name: ForkName) -> Result<(), Error> {
         let mut state = self.pre.clone();
-        let spec = &testing_spec::<E>(fork_name);
+        let spec = &testing_spec_for_case::<E>(&self.path, fork_name)?;
 
         // Single-pass epoch processing doesn't compute rewards in the genesis epoch because that's
         // what the spec for `process_rewards_and_penalties` says to do. We skip these tests for now.

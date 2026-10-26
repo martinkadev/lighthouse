@@ -358,7 +358,7 @@ impl<E: EthSpec> EpochTransition<E> for BuilderPendingPayments {
 impl<E: EthSpec, T: EpochTransition<E>> LoadCase for EpochProcessing<E, T> {
     fn load_from_dir(path: &Path, fork_name: ForkName) -> Result<Self, Error> {
         let config = load_config(path)?;
-        let spec = &testing_spec_with_config::<E>(fork_name, config.as_ref())?;
+        let spec = &testing_spec_with_config::<E>(path, fork_name, config.as_ref())?;
         let metadata_path = path.join("meta.yaml");
         let metadata: Metadata = if metadata_path.is_file() {
             yaml_decode_file(&metadata_path)?
@@ -479,7 +479,7 @@ impl<E: EthSpec, T: EpochTransition<E>> Case for EpochProcessing<E, T> {
     fn result(&self, _case_index: usize, fork_name: ForkName) -> Result<(), Error> {
         self.metadata.bls_setting.unwrap_or_default().check()?;
 
-        let spec = &testing_spec_with_config::<E>(fork_name, self.config.as_ref())?;
+        let spec = &testing_spec_with_config::<E>(&self.path, fork_name, self.config.as_ref())?;
         let mut pre_state = self.pre.clone();
 
         // Processing requires the committee caches.

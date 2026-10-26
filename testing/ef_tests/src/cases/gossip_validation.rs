@@ -1,3 +1,4 @@
+use super::common::testing_spec_for_case;
 use super::*;
 use crate::bls_setting::BlsSetting;
 use crate::decode::{ssz_decode_file, ssz_decode_file_with, ssz_decode_state, yaml_decode_file};
@@ -756,7 +757,7 @@ impl Topic {
 
 impl<E: EthSpec> GossipValidation<E> {
     fn testing_spec(path: &Path, fork_name: ForkName) -> Result<ChainSpec, Error> {
-        let mut spec = testing_spec::<E>(fork_name);
+        let mut spec = testing_spec_for_case::<E>(path, fork_name)?;
         let config_path = path.join("config.yaml");
         if !config_path.exists() {
             return Ok(spec);

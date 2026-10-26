@@ -1,3 +1,4 @@
+use super::common::testing_spec_for_case;
 use super::*;
 use crate::case_result::compare_beacon_state_results_without_caches;
 use crate::decode::{ssz_decode_file, ssz_decode_state, yaml_decode_file};
@@ -25,6 +26,7 @@ impl Metadata {
 
 #[derive(Debug)]
 pub struct ForkTest<E: EthSpec> {
+    path: PathBuf,
     pub metadata: Metadata,
     pub pre: BeaconState<E>,
     pub post: BeaconState<E>,
@@ -51,10 +53,11 @@ impl<E: EthSpec> LoadCase for ForkTest<E> {
         };
 
         // Decode post-state with target fork.
-        let post_spec = &fork_name.make_genesis_spec(E::default_spec());
+        let post_spec = &testing_spec_for_case::<E>(path, fork_name)?;
         let post = ssz_decode_state(&path.join("post.ssz_snappy"), post_spec)?;
 
         Ok(Self {
+            path: path.to_path_buf(),
             metadata,
             pre,
             post,
@@ -76,14 +79,10 @@ impl<E: EthSpec> Case for ForkTest<E> {
     fn result(&self, _case_index: usize, fork_name: ForkName) -> Result<(), Error> {
         let mut result_state = self.pre.clone();
         let mut expected = Some(self.post.clone());
-        let spec = &fork_name.make_genesis_spec(E::default_spec());
+        let spec = &testing_spec_for_case::<E>(&self.path, fork_name)?;
 
         let mut result = if self.metadata.fork == "eip8321" {
-            // The local feature configs use 0xe83210 followed by the network byte:
-            // mainnet 0xe8321000, minimal 0xe8321001.
-            let [_, _, _, network] = spec.heze_fork_version;
-            let feature_version = [0xe8, 0x32, 0x10, network];
-            upgrade_to_eip8321(&mut result_state, feature_version).map(|_| result_state)
+            upgrade_to_eip8321(&mut result_state, spec.heze_fork_version).map(|_| result_state)
         } else {
             match fork_name {
                 ForkName::Base => panic!("phase0 not supported"),

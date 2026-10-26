@@ -1,3 +1,4 @@
+use super::common::testing_spec_for_case;
 use super::*;
 use crate::case_result::compare_result;
 use crate::decode::{context_yaml_decode_file, snappy_decode_file, yaml_decode_file};
@@ -25,6 +26,7 @@ pub struct SszStatic<T> {
 /// Runner for `BeaconState` (with tree hash cache).
 #[derive(Debug, Clone)]
 pub struct SszStaticTHC<T> {
+    path: PathBuf,
     roots: SszStaticRoots,
     serialized: Vec<u8>,
     value: T,
@@ -33,6 +35,7 @@ pub struct SszStaticTHC<T> {
 /// Runner for types that require a `ChainSpec` to be decoded (`BeaconBlock`, etc).
 #[derive(Debug, Clone)]
 pub struct SszStaticWithSpec<T> {
+    path: PathBuf,
     roots: SszStaticRoots,
     serialized: Vec<u8>,
     value: T,
@@ -70,6 +73,7 @@ impl<T: SszStaticType + for<'de> ContextDeserialize<'de, ForkName>> LoadCase for
 impl<T: SszStaticType + for<'de> ContextDeserialize<'de, ForkName>> LoadCase for SszStaticTHC<T> {
     fn load_from_dir(path: &Path, fork_name: ForkName) -> Result<Self, Error> {
         load_from_dir(path, fork_name).map(|(roots, serialized, value)| Self {
+            path: path.to_path_buf(),
             roots,
             serialized,
             value,
@@ -112,7 +116,7 @@ impl<T: SszStaticType + TreeHash + Decode> Case for SszStatic<T> {
 
 impl<E: EthSpec> Case for SszStaticTHC<BeaconState<E>> {
     fn result(&self, _case_index: usize, fork_name: ForkName) -> Result<(), Error> {
-        let spec = &testing_spec::<E>(fork_name);
+        let spec = &testing_spec_for_case::<E>(&self.path, fork_name)?;
         check_serialization(&self.value, &self.serialized, |bytes| {
             BeaconState::from_ssz_bytes(bytes, spec)
         })?;
@@ -128,6 +132,7 @@ impl<E: EthSpec> Case for SszStaticTHC<BeaconState<E>> {
 impl<E: EthSpec> LoadCase for SszStaticWithSpec<BeaconBlock<E>> {
     fn load_from_dir(path: &Path, fork_name: ForkName) -> Result<Self, Error> {
         load_from_dir(path, fork_name).map(|(roots, serialized, value)| Self {
+            path: path.to_path_buf(),
             roots,
             serialized,
             value,
@@ -137,7 +142,7 @@ impl<E: EthSpec> LoadCase for SszStaticWithSpec<BeaconBlock<E>> {
 
 impl<E: EthSpec> Case for SszStaticWithSpec<BeaconBlock<E>> {
     fn result(&self, _case_index: usize, fork_name: ForkName) -> Result<(), Error> {
-        let spec = &testing_spec::<E>(fork_name);
+        let spec = &testing_spec_for_case::<E>(&self.path, fork_name)?;
         check_serialization(&self.value, &self.serialized, |bytes| {
             BeaconBlock::from_ssz_bytes(bytes, spec)
         })?;
@@ -149,6 +154,7 @@ impl<E: EthSpec> Case for SszStaticWithSpec<BeaconBlock<E>> {
 impl<E: EthSpec> LoadCase for SszStaticWithSpec<SignedBeaconBlock<E>> {
     fn load_from_dir(path: &Path, fork_name: ForkName) -> Result<Self, Error> {
         load_from_dir(path, fork_name).map(|(roots, serialized, value)| Self {
+            path: path.to_path_buf(),
             roots,
             serialized,
             value,
@@ -158,7 +164,7 @@ impl<E: EthSpec> LoadCase for SszStaticWithSpec<SignedBeaconBlock<E>> {
 
 impl<E: EthSpec> Case for SszStaticWithSpec<SignedBeaconBlock<E>> {
     fn result(&self, _case_index: usize, fork_name: ForkName) -> Result<(), Error> {
-        let spec = &testing_spec::<E>(fork_name);
+        let spec = &testing_spec_for_case::<E>(&self.path, fork_name)?;
         check_serialization(&self.value, &self.serialized, |bytes| {
             SignedBeaconBlock::from_ssz_bytes(bytes, spec)
         })?;
@@ -170,6 +176,7 @@ impl<E: EthSpec> Case for SszStaticWithSpec<SignedBeaconBlock<E>> {
 impl<E: EthSpec> LoadCase for SszStaticWithSpec<DataColumnsByRootIdentifier<E>> {
     fn load_from_dir(path: &Path, fork_name: ForkName) -> Result<Self, Error> {
         load_from_dir(path, fork_name).map(|(roots, serialized, value)| Self {
+            path: path.to_path_buf(),
             roots,
             serialized,
             value,
