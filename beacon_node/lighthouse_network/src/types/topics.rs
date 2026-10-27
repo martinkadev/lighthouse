@@ -103,9 +103,7 @@ pub fn core_topics_to_subscribe<E: EthSpec>(
 
     if fork_name.heze_enabled() {
         topics.push(GossipKind::InclusionList);
-        // TODO(EIP-8321): subscribe to `RandaoCommitmentRegistration` once gossip validation and
-        // beacon-processor routing are implemented. Advertising the topic while dropping messages
-        // would silently black-hole registrations.
+        topics.push(GossipKind::RandaoCommitmentRegistration);
     }
 
     topics
@@ -630,5 +628,20 @@ mod tests {
                 expected_topic
             );
         }
+    }
+
+    #[test]
+    fn randao_registration_subscription_starts_at_heze() {
+        let spec = get_spec();
+        let subnets = HashSet::new();
+        let config = get_topic_config(&subnets);
+        assert!(
+            !core_topics_to_subscribe::<E>(ForkName::Gloas, &config, &spec)
+                .contains(&GossipKind::RandaoCommitmentRegistration)
+        );
+        assert!(
+            core_topics_to_subscribe::<E>(ForkName::Heze, &config, &spec)
+                .contains(&GossipKind::RandaoCommitmentRegistration)
+        );
     }
 }

@@ -120,7 +120,8 @@ use itertools::process_results;
 use kzg::Kzg;
 use logging::crit;
 use operation_pool::{
-    CompactAttestationRef, OperationPool, PersistedOperationPool, ReceivedPreCapella,
+    CompactAttestationRef, OperationPool, PersistedOperationPool,
+    PersistedRandaoCommitmentRegistrations, ReceivedPreCapella,
 };
 use parking_lot::{Mutex, RwLock};
 use proof_engine::ProofEngine;
@@ -177,6 +178,7 @@ type HashBlockTuple<E> = (Hash256, RangeSyncBlock<E>);
 // These keys are all zero because they get stored in different columns, see `DBColumn` type.
 pub const BEACON_CHAIN_DB_KEY: Hash256 = Hash256::ZERO;
 pub const OP_POOL_DB_KEY: Hash256 = Hash256::ZERO;
+pub const RANDAO_REGISTRATIONS_DB_KEY: Hash256 = Hash256::new([0x83; 32]);
 pub const FORK_CHOICE_DB_KEY: Hash256 = Hash256::ZERO;
 /// The roots sent as the FCU safe block hash. Shares the `ForkChoice` column, so not zero.
 pub const FAST_CONFIRMATION_DB_KEY: Hash256 = Hash256::repeat_byte(1);
@@ -726,6 +728,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         self.store.put_item(
             &OP_POOL_DB_KEY,
             &PersistedOperationPool::from_operation_pool(&self.op_pool),
+        )?;
+        self.store.put_item(
+            &RANDAO_REGISTRATIONS_DB_KEY,
+            &PersistedRandaoCommitmentRegistrations {
+                registrations: self.op_pool.all_randao_commitment_registrations(),
+            },
         )?;
 
         Ok(())

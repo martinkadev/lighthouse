@@ -25,8 +25,8 @@ use types::{
     Checkpoint, EthSpec, ExecPayload, ForkName, Hash256, ProposerSlashing, SignedAggregateAndProof,
     SignedAggregateAndProofBase, SignedAggregateAndProofElectra, SignedAggregateAndProofGloas,
     SignedBeaconBlock, SignedBlsToExecutionChange, SignedContributionAndProof,
-    SignedExecutionPayloadEnvelope, SignedVoluntaryExit, SingleAttestation, Slot, SubnetId,
-    SyncCommitteeMessage, SyncSubnetId,
+    SignedExecutionPayloadEnvelope, SignedRandaoCommitmentRegistration, SignedVoluntaryExit,
+    SingleAttestation, Slot, SubnetId, SyncCommitteeMessage, SyncSubnetId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -138,6 +138,7 @@ enum Topic {
     BlsToExecutionChange,
     SyncCommittee,
     SyncCommitteeContributionAndProof,
+    RandaoCommitmentRegistration,
 }
 
 #[derive(Debug)]
@@ -238,6 +239,27 @@ impl<E: EthSpec> GossipTester<E> {
         tester.set_time_ms(current_time_ms)?;
         tester.import_setup_blocks(case, &blocks, initial_block_index)?;
         tester.set_finalized_checkpoint(case.finalized_checkpoint(&blocks)?);
+
+        // This upstream case pre-populates its Python Seen set but does not export it.
+        // Reproduce that setup through a validated prior registration, before processing
+        // the actual fixture message. No expected outcome is used to change validation.
+        if case.meta.topic == Topic::RandaoCommitmentRegistration
+            && case.path.file_name().and_then(|name| name.to_str())
+                == Some("gossip_randao_commitment_registration__ignore_already_seen")
+        {
+            let message = case.meta.messages.first().ok_or_else(|| {
+                Error::FailedToParseTest("seen-registration fixture has no message".into())
+            })?;
+            let registration: SignedRandaoCommitmentRegistration =
+                ssz_decode_file(&case.path.join(format!("{}.ssz_snappy", message.message)))?;
+            tester
+                .harness
+                .chain
+                .verify_and_import_randao_commitment_registration(registration)
+                .map_err(|e| {
+                    Error::InternalError(format!("unable to prepare seen registration: {e:?}"))
+                })?;
+        }
 
         Ok(tester)
     }
@@ -426,6 +448,21 @@ impl<E: EthSpec> GossipTester<E> {
         let peer_id = PeerId::random();
 
         match topic {
+            Topic::RandaoCommitmentRegistration => {
+                let registration: SignedRandaoCommitmentRegistration = match ssz_decode_file(
+                    &path.join(format!("{}.ssz_snappy", message_meta.message)),
+                ) {
+                    Ok(registration) => registration,
+                    Err(Error::InvalidBLSInput(_)) => return Ok(MessageAcceptance::Reject),
+                    Err(error) => return Err(error),
+                };
+                self.network_beacon_processor
+                    .process_gossip_randao_commitment_registration(
+                        message_id.clone(),
+                        peer_id,
+                        Box::new(registration),
+                    );
+            }
             Topic::ProposerSlashing => {
                 self.process_proposer_slashing(path, message_meta, message_id.clone(), peer_id)?
             }

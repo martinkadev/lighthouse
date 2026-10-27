@@ -56,9 +56,9 @@ use types::{
     LightClientOptimisticUpdate, PartialDataColumn, PayloadAttestationMessage, ProposerSlashing,
     SignedAggregateAndProof, SignedBeaconBlock, SignedBlsToExecutionChange,
     SignedContributionAndProof, SignedExecutionPayloadBid, SignedExecutionPayloadEnvelope,
-    SignedInclusionList, SignedProposerPreferences, SignedVoluntaryExit, SingleAttestation, Slot,
-    SubnetId, SyncCommitteeMessage, SyncSubnetId, block::BlockImportSource, data::CellBitmap,
-    execution::SignedExecutionProofEnvelope,
+    SignedInclusionList, SignedProposerPreferences, SignedRandaoCommitmentRegistration,
+    SignedVoluntaryExit, SingleAttestation, Slot, SubnetId, SyncCommitteeMessage, SyncSubnetId,
+    block::BlockImportSource, data::CellBitmap, execution::SignedExecutionProofEnvelope,
 };
 
 use beacon_processor::work_reprocessing_queue::QueuedColumnReconstruction;
@@ -4703,6 +4703,36 @@ mod tests {
                 None,
                 "re-queuing twice from {start:?} should be terminal"
             );
+        }
+    }
+}
+
+impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
+    pub fn process_gossip_randao_commitment_registration(
+        self: &Arc<Self>,
+        message_id: MessageId,
+        peer_id: PeerId,
+        registration: Box<SignedRandaoCommitmentRegistration>,
+    ) {
+        match self
+            .chain
+            .verify_and_import_randao_commitment_registration(*registration)
+        {
+            Ok(()) => {
+                self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Accept)
+            }
+            Err(error) if error.should_reject() => {
+                debug!(?error, %peer_id, "Invalid RANDAO commitment registration");
+                self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Reject);
+                self.gossip_penalize_peer(
+                    peer_id,
+                    PeerAction::LowToleranceError,
+                    "invalid_randao_registration",
+                );
+            }
+            Err(_) => {
+                self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Ignore)
+            }
         }
     }
 }

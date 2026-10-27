@@ -5,6 +5,7 @@ mod bls_to_execution_changes;
 mod max_cover;
 mod metrics;
 mod persistence;
+mod randao_commitment_registrations;
 mod reward_cache;
 mod sync_aggregate_id;
 
@@ -15,6 +16,7 @@ pub use max_cover::MaxCover;
 pub use persistence::{
     PersistedOperationPool, PersistedOperationPoolV15, PersistedOperationPoolV20,
 };
+pub use randao_commitment_registrations::PersistedRandaoCommitmentRegistrations;
 pub use reward_cache::RewardCache;
 use state_processing::epoch_cache::is_epoch_cache_initialized;
 use types::EpochCacheError;
@@ -65,6 +67,9 @@ pub struct OperationPool<E: EthSpec + Default> {
     /// Map from payload attestation data to individual messages for aggregation at block production.
     payload_attestation_messages:
         RwLock<HashMap<PayloadAttestationData, Vec<PayloadAttestationMessage>>>,
+    /// First signature-verified RANDAO registration received for each validator.
+    randao_commitment_registrations:
+        RwLock<HashMap<u64, types::SignedRandaoCommitmentRegistration>>,
     /// Reward cache for accelerating attestation packing.
     reward_cache: RwLock<RewardCache>,
     _phantom: PhantomData<E>,
@@ -895,6 +900,8 @@ impl<E: EthSpec + Default> PartialEq for OperationPool<E> {
             && *self.proposer_slashings.read() == *other.proposer_slashings.read()
             && *self.voluntary_exits.read() == *other.voluntary_exits.read()
             && *self.bls_to_execution_changes.read() == *other.bls_to_execution_changes.read()
+            && *self.randao_commitment_registrations.read()
+                == *other.randao_commitment_registrations.read()
     }
 }
 

@@ -2,6 +2,7 @@ use crate::ChainConfig;
 use crate::CustodyContext;
 use crate::beacon_chain::{
     BEACON_CHAIN_DB_KEY, CanonicalHead, LightClientProducerEvent, OP_POOL_DB_KEY,
+    RANDAO_REGISTRATIONS_DB_KEY,
 };
 use crate::beacon_proposer_cache::BeaconProposerCache;
 use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
@@ -31,7 +32,9 @@ use fork_choice::{ForkChoice, PayloadStatus, ResetPayloadStatuses};
 use futures::channel::mpsc::Sender;
 use kzg::Kzg;
 use logging::crit;
-use operation_pool::{OperationPool, PersistedOperationPool};
+use operation_pool::{
+    OperationPool, PersistedOperationPool, PersistedRandaoCommitmentRegistrations,
+};
 use parking_lot::{Mutex, RwLock};
 use proof_engine::ProofEngine;
 use rand::RngCore;
@@ -282,6 +285,16 @@ where
                 })?
                 .unwrap_or_else(OperationPool::new),
         );
+
+        if let Some(registrations) = store
+            .get_item::<PersistedRandaoCommitmentRegistrations>(&RANDAO_REGISTRATIONS_DB_KEY)
+            .map_err(|e| format!("Unable to load RANDAO registrations: {e:?}"))?
+            && let Some(pool) = self.op_pool.as_ref()
+        {
+            for registration in registrations.registrations {
+                pool.insert_randao_commitment_registration(registration);
+            }
+        }
 
         let pubkey_cache = ValidatorPubkeyCache::load_from_store(store)
             .map_err(|e| format!("Unable to open persisted pubkey cache: {:?}", e))?;

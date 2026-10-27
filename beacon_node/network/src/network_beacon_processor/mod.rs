@@ -531,6 +531,26 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         })
     }
 
+    /// Validate registrations on the bounded beacon-processor queue.
+    pub fn send_gossip_randao_commitment_registration(
+        self: &Arc<Self>,
+        message_id: MessageId,
+        peer_id: PeerId,
+        registration: Box<SignedRandaoCommitmentRegistration>,
+    ) -> Result<(), Error<T::EthSpec>> {
+        let processor = self.clone();
+        self.try_send(BeaconWorkEvent {
+            drop_during_sync: true,
+            work: Work::GossipRandaoCommitmentRegistration(Box::new(move || {
+                processor.process_gossip_randao_commitment_registration(
+                    message_id,
+                    peer_id,
+                    registration,
+                )
+            })),
+        })
+    }
+
     /// Create a new `Work` event for some proposer preferences
     pub fn send_gossip_proposer_preferences(
         self: &Arc<Self>,
