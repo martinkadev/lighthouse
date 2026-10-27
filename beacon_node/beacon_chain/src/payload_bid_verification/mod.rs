@@ -78,6 +78,8 @@ pub enum PayloadBidError {
     InvalidFeeRecipient,
     /// The bid's gas limit is not compatible with the proposer's target gas limit.
     InvalidGasLimit,
+    /// A timely inclusion list observed locally is missing from the bid's bits.
+    InclusionListBitsNotInclusive,
     /// The bids execution payment is non-zero
     ExecutionPaymentNonZero { execution_payment: u64 },
     /// The bids block hash equals its parent block hash

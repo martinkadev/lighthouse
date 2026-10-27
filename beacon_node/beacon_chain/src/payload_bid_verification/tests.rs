@@ -58,6 +58,7 @@ struct TestContext {
     canonical_head: CanonicalHead<T>,
     observed_execution_payloads: ObservedExecutionPayloads,
     bid_cache: GossipVerifiedPayloadBidCache<E>,
+    inclusion_list_store: parking_lot::RwLock<crate::inclusion_list_store::InclusionListStore<E>>,
     preferences_cache: GossipVerifiedProposerPreferenceCache,
     slot_clock: TestingSlotClock,
     keypairs: Vec<Keypair>,
@@ -77,6 +78,10 @@ fn builder_withdrawal_credentials(pubkey: &bls::PublicKey, spec: &ChainSpec) -> 
 
 impl TestContext {
     fn new() -> Self {
+        Self::new_at_slot(Slot::new(0))
+    }
+
+    fn new_at_slot(anchor_slot: Slot) -> Self {
         let spec = test_spec::<E>();
         let store = Arc::new(
             HotColdDB::open_ephemeral(StoreConfig::default(), Arc::new(spec.clone()))
@@ -116,6 +121,24 @@ impl TestContext {
                 .expect("should register builder");
         }
 
+        // Advance while genesis finality is still valid. The activation override below
+        // would otherwise underflow finality-delay arithmetic in the first epoch transition.
+        if anchor_slot > state.slot() {
+            state_processing::AllCaches::build_all_caches(&mut state, &spec)
+                .expect("should initialize native fixture epoch caches");
+            let state_root = state
+                .update_tree_hash_cache()
+                .expect("should hash fixture state");
+            state_processing::state_advance::partial_state_advance(
+                &mut state,
+                Some(state_root),
+                anchor_slot,
+                None,
+                &spec,
+            )
+            .expect("should advance native fixture state");
+        }
+
         // Bump finalized checkpoint epoch so builders are considered active
         // (is_active_builder requires deposit_epoch < finalized_checkpoint.epoch).
         *state.finalized_checkpoint_mut() = Checkpoint {
@@ -137,6 +160,15 @@ impl TestContext {
             .expect("should register inactive builder");
 
         let mut block = genesis_block(&state, &spec).expect("should build genesis block");
+        if anchor_slot > Slot::new(0) {
+            *block.slot_mut() = anchor_slot;
+            let header = state.latest_block_header_mut();
+            header.slot = anchor_slot;
+            header.state_root = Hash256::ZERO;
+            header.body_root = block.body_root();
+            state_processing::AllCaches::build_all_caches(&mut state, &spec)
+                .expect("should initialize synthetic anchor caches");
+        }
         *block.state_root_mut() = state
             .update_tree_hash_cache()
             .expect("should hash genesis state");
@@ -161,7 +193,7 @@ impl TestContext {
             .expect("should store genesis block");
 
         let head_node = fork_choice
-            .get_head(Slot::new(0), &spec)
+            .get_head(anchor_slot, &spec)
             .expect("should run get_head");
 
         let canonical_head = CanonicalHead::new(
@@ -187,10 +219,14 @@ impl TestContext {
             spec.get_slot_duration(),
         );
 
+        slot_clock.set_slot(anchor_slot.as_u64());
         Self {
             canonical_head,
             observed_execution_payloads,
             bid_cache: GossipVerifiedPayloadBidCache::default(),
+            inclusion_list_store: parking_lot::RwLock::new(
+                crate::inclusion_list_store::InclusionListStore::new(&spec),
+            ),
             preferences_cache: GossipVerifiedProposerPreferenceCache::default(),
             slot_clock,
             keypairs,
@@ -224,6 +260,7 @@ impl TestContext {
         GossipVerificationContext {
             canonical_head: &self.canonical_head,
             observed_execution_payloads: &self.observed_execution_payloads,
+            inclusion_list_store: &self.inclusion_list_store,
             gossip_verified_payload_bid_cache: &self.bid_cache,
             gossip_verified_proposer_preferences_cache: &self.preferences_cache,
             slot_clock: &self.slot_clock,
@@ -1232,13 +1269,15 @@ fn valid_bid_with_parent_in_previous_epoch() {
     if !fork_name_from_env().is_some_and(|fork| fork.gloas_enabled()) {
         return;
     }
-    let epoch_start = E::slots_per_epoch();
+    let epoch_start = 3 * E::slots_per_epoch();
     for (current_slot, bid_slot) in [
         (epoch_start - 1, epoch_start),
         (epoch_start, epoch_start),
         (epoch_start + 1, epoch_start + 1),
     ] {
-        let ctx = TestContext::new();
+        // Fork-choice anchors must be epoch-aligned; this parent is in the
+        // preceding epoch for every bid below.
+        let ctx = TestContext::new_at_slot(Slot::new(epoch_start - E::slots_per_epoch()));
         ctx.slot_clock.set_slot(current_slot);
         let slot = Slot::new(bid_slot);
         seed_preferences(&ctx, slot, Address::ZERO, 30_000_000);

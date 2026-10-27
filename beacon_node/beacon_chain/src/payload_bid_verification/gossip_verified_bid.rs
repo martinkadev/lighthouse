@@ -263,6 +263,8 @@ pub(crate) fn is_bid_compatible_with_head<T: BeaconChainTypes>(
 pub struct GossipVerificationContext<'a, T: BeaconChainTypes> {
     pub canonical_head: &'a CanonicalHead<T>,
     pub observed_execution_payloads: &'a ObservedExecutionPayloads,
+    pub inclusion_list_store:
+        &'a parking_lot::RwLock<crate::inclusion_list_store::InclusionListStore<T::EthSpec>>,
     pub gossip_verified_payload_bid_cache: &'a GossipVerifiedPayloadBidCache<T::EthSpec>,
     pub gossip_verified_proposer_preferences_cache: &'a GossipVerifiedProposerPreferenceCache,
     pub slot_clock: &'a T::SlotClock,
@@ -295,11 +297,25 @@ impl<E: EthSpec> GossipVerifiedPayloadBid<E> {
         let bid_parent = BidParent::from_bid(signed_bid.message());
         let bid_parent_block_root = signed_bid.message().parent_block_root();
         let bid_value = signed_bid.message().value();
-        let current_slot = ctx
+        // Gossip permits both the current and next slot with inclusive clock disparity.
+        let now = ctx
             .slot_clock
-            .now()
+            .now_duration()
             .ok_or(PayloadBidError::UnableToReadSlot)?;
-        verify_bid_slot(bid_slot, current_slot)?;
+        let earliest = ctx
+            .slot_clock
+            .start_of(bid_slot.saturating_sub(1_u64))
+            .ok_or(PayloadBidError::UnableToReadSlot)?
+            .saturating_sub(ctx.spec.maximum_gossip_clock_disparity());
+        let latest = ctx
+            .slot_clock
+            .start_of(bid_slot)
+            .and_then(|start| start.checked_add(ctx.spec.get_slot_duration()))
+            .and_then(|end| end.checked_add(ctx.spec.maximum_gossip_clock_disparity()))
+            .ok_or(PayloadBidError::UnableToReadSlot)?;
+        if now < earliest || now > latest {
+            return Err(PayloadBidError::InvalidBidSlot { bid_slot });
+        }
 
         if ctx
             .gossip_verified_payload_bid_cache
@@ -446,7 +462,22 @@ impl<E: EthSpec> GossipVerifiedPayloadBid<E> {
             return Err(PayloadBidError::InvalidPrevRandao { slot: bid_slot });
         }
 
-        verify_bid_state_conditions(signed_bid.message(), head_state, ctx.spec)?;
+        // Epoch processing at the proposal slot can release pending builder payments.
+        // Validate coverability against that advanced state, as block processing will.
+        let mut proposal_state = head_state.clone();
+        if proposal_state.slot() < bid_slot {
+            state_processing::state_advance::partial_state_advance(
+                &mut proposal_state,
+                Some(cached_head.head_state_root()),
+                bid_slot,
+                None,
+                ctx.spec,
+            )
+            .map_err(|error| {
+                PayloadBidError::InternalError(format!("bid state advance: {error:?}"))
+            })?;
+        }
+        verify_bid_state_conditions(signed_bid.message(), &proposal_state, ctx.spec)?;
 
         if parent_payload_exits_builder::<T>(
             signed_bid.message(),
@@ -457,6 +488,39 @@ impl<E: EthSpec> GossipVerifiedPayloadBid<E> {
             return Err(PayloadBidError::BuilderExitPending {
                 builder_index: signed_bid.message().builder_index(),
             });
+        }
+
+        if let Ok(bits) = signed_bid.message().inclusion_list_bits() {
+            let inclusion_slot = bid_slot.saturating_sub(1_u64);
+            let inclusion_epoch = inclusion_slot.epoch(T::EthSpec::slots_per_epoch());
+            let relative_epoch =
+                types::RelativeEpoch::from_epoch(proposal_state.current_epoch(), inclusion_epoch)
+                    .map_err(|error| {
+                    PayloadBidError::InternalError(format!("inclusion-list epoch: {error:?}"))
+                })?;
+            proposal_state.build_committee_cache(relative_epoch, ctx.spec)?;
+            let committee = proposal_state.get_inclusion_list_committee(inclusion_slot)?;
+            let decision_root = proposal_state.proposer_shuffling_decision_root_at_epoch(
+                inclusion_epoch,
+                cached_head.head_block_root(),
+                ctx.spec,
+            )?;
+            if !ctx
+                .inclusion_list_store
+                .read()
+                .is_inclusion_list_bits_inclusive(
+                    inclusion_slot,
+                    decision_root,
+                    &committee,
+                    bits,
+                    true,
+                )
+                .map_err(|error| {
+                    PayloadBidError::InternalError(format!("inclusion-list bits: {error:?}"))
+                })?
+            {
+                return Err(PayloadBidError::InclusionListBitsNotInclusive);
+            }
         }
 
         execution_payload_bid_signature_set(
@@ -486,6 +550,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         GossipVerificationContext {
             canonical_head: &self.canonical_head,
             observed_execution_payloads: &self.observed_execution_payloads,
+            inclusion_list_store: &self.inclusion_list_store,
             gossip_verified_payload_bid_cache: &self.gossip_verified_payload_bid_cache,
             gossip_verified_proposer_preferences_cache: &self
                 .gossip_verified_proposer_preferences_cache,

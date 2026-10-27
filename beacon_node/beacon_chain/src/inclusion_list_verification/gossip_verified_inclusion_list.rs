@@ -82,32 +82,47 @@ impl GossipVerifiedInclusionList {
             .start_slot(T::EthSpec::slots_per_epoch());
         let dependent_slot = lookahead_start_slot.saturating_sub(1_u64);
 
-        let head_block_root = ctx.canonical_head.cached_head().head_block_root();
+        let cached_head = ctx.canonical_head.cached_head();
+        let head_block_root = cached_head.head_block_root();
         let fork_choice_read = ctx.canonical_head.fork_choice_read_lock();
 
-        // [IGNORE] The dependent block has been seen and passes validation.
-        let dependent_block = fork_choice_read
-            .get_block(&dependent_root)
-            .ok_or(InclusionListVerificationError::DependentRootUnknown { dependent_root })?;
+        // A finalized canonical decision block may have been pruned from fork choice.
+        let finalized_dependent = dependent_slot
+            < fork_choice_read
+                .finalized_checkpoint()
+                .epoch
+                .start_slot(T::EthSpec::slots_per_epoch())
+            && cached_head
+                .snapshot
+                .beacon_state
+                .get_block_root(dependent_slot)
+                .is_ok_and(|root| *root == dependent_root);
+        if !finalized_dependent {
+            // [IGNORE] The dependent block has been seen and passes validation.
+            let dependent_block = fork_choice_read
+                .get_block(&dependent_root)
+                .ok_or(InclusionListVerificationError::DependentRootUnknown { dependent_root })?;
 
-        // [REJECT] The dependent block is not after `dependent_slot`.
-        if dependent_block.slot > dependent_slot {
-            return Err(InclusionListVerificationError::DependentRootTooRecent {
-                dependent_root,
-                block_slot: dependent_block.slot,
-                dependent_slot,
-            });
+            // [REJECT] The dependent block is not after `dependent_slot`.
+            if dependent_block.slot > dependent_slot {
+                return Err(InclusionListVerificationError::DependentRootTooRecent {
+                    dependent_root,
+                    block_slot: dependent_block.slot,
+                    dependent_slot,
+                });
+            }
+
+            // [IGNORE] The dependent block is a possible dependent block for `epoch`.
+            let has_qualifying_child = fork_choice_read
+                .get_children(&dependent_root)
+                .iter()
+                .any(|child| child.slot > dependent_slot);
+            if !has_qualifying_child && dependent_root != head_block_root {
+                return Err(InclusionListVerificationError::InvalidDependentRoot {
+                    dependent_root,
+                });
+            }
         }
-
-        // [IGNORE] The dependent block is a possible dependent block for `epoch`.
-        let has_qualifying_child = fork_choice_read
-            .get_children(&dependent_root)
-            .iter()
-            .any(|child| child.slot > dependent_slot);
-        if !has_qualifying_child && dependent_root != head_block_root {
-            return Err(InclusionListVerificationError::InvalidDependentRoot { dependent_root });
-        }
-
         drop(fork_choice_read);
 
         // The checks above confirm `dependent_root` is the shuffling decision block for `epoch`.
@@ -117,7 +132,11 @@ impl GossipVerifiedInclusionList {
             ctx.store,
             ctx.builder_onboarding_cache,
             ctx.spec,
-            dependent_root,
+            if finalized_dependent {
+                head_block_root
+            } else {
+                dependent_root
+            },
             epoch,
             |cached_shuffling, _| {
                 cached_shuffling
@@ -194,8 +213,21 @@ fn verify_propagation_slot_range<S: SlotClock>(
 
     let earliest_permissible_slot = slot_clock
         .now_with_past_tolerance(spec.maximum_gossip_clock_disparity())
+        // Before genesis + disparity, the earliest permissible slot is genesis.
+        .or_else(|| slot_clock.now().map(|_| spec.genesis_slot))
         .ok_or(BeaconChainError::UnableToReadSlot)?;
     if message_slot < earliest_permissible_slot {
+        let inclusive_end = slot_clock
+            .start_of(message_slot)
+            .and_then(|start| start.checked_add(spec.get_slot_duration()))
+            .and_then(|end| end.checked_add(spec.maximum_gossip_clock_disparity()));
+        if slot_clock
+            .now_duration()
+            .zip(inclusive_end)
+            .is_some_and(|(now, end)| now <= end)
+        {
+            return Ok(());
+        }
         return Err(InclusionListVerificationError::PastSlot {
             message_slot,
             earliest_permissible_slot,
@@ -287,5 +319,32 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         }
 
         outcome
+    }
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+    use slot_clock::TestingSlotClock;
+    use types::{ForkName, MinimalEthSpec};
+
+    #[test]
+    fn inclusion_list_timing_includes_genesis_and_disparity_boundaries() {
+        let spec = ForkName::Heze.make_genesis_spec(MinimalEthSpec::default_spec());
+        let clock = TestingSlotClock::new(Slot::new(0), Duration::ZERO, spec.get_slot_duration());
+        for (slot, time_ms, accepted) in [
+            (0, 100, true),
+            (1, 5499, false),
+            (1, 5500, true),
+            (1, 12500, true),
+            (1, 12501, false),
+        ] {
+            clock.set_current_time(Duration::from_millis(time_ms));
+            assert_eq!(
+                verify_propagation_slot_range(&clock, Slot::new(slot), &spec).is_ok(),
+                accepted,
+                "slot {slot} at {time_ms}ms"
+            );
+        }
     }
 }

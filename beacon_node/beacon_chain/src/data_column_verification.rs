@@ -1330,9 +1330,11 @@ fn validate_partial_data_column_sidecar_for_gossip_fulu<T: BeaconChainTypes>(
             .get_header(&block_root)
             .map(GossipVerifiedPartialDataColumnHeader::new_from_cached)
         else {
-            return PartialColumnVerificationResult::Err(
-                GossipPartialDataColumnError::MissingHeader,
-            );
+            return PartialColumnVerificationResult::Err(if column.sidecar.column.is_empty() {
+                GossipPartialDataColumnError::EmptyMessage
+            } else {
+                GossipPartialDataColumnError::MissingHeader
+            });
         };
 
         // If there was no header, there must be at least one cell.
@@ -1345,6 +1347,15 @@ fn validate_partial_data_column_sidecar_for_gossip_fulu<T: BeaconChainTypes>(
 
         header
     };
+
+    // A cached header still needs the current propagation/finalization checks.
+    if let Err(err) = verify_sidecar_not_from_future_slot(chain, header.as_header().slot())
+        .and_then(|()| {
+            verify_slot_greater_than_latest_finalized_slot(chain, header.as_header().slot())
+        })
+    {
+        return PartialColumnVerificationResult::Err(err.into());
+    }
 
     match validate_partial_data_column_common(
         PartialDataColumnRef::Fulu(&column),
@@ -1451,6 +1462,11 @@ fn validate_partial_data_column_common<T: BeaconChainTypes>(
         );
     }
 
+    // Header-only messages contain no cells to verify or deduplicate. Their header
+    // and bitmap bounds have already been validated.
+    if cells_len == 0 {
+        return Ok(());
+    }
     // We do not have to check block related data here, as we create the verifiable column from a
     // gossip accepted block.
     verify_kzg_for_partial_data_column(column, kzg_commitments, chain)

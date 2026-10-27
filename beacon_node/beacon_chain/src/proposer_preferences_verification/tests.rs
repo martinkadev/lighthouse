@@ -250,6 +250,8 @@ fn proposal_slot_already_passed() {
         return;
     }
     let ctx = TestContext::new();
+    // Slot start itself is within the newly specified inclusive disparity window.
+    ctx.slot_clock.set_current_time(Duration::from_millis(501));
     let gossip = ctx.gossip_ctx();
 
     let prefs = make_signed_preferences(Slot::new(0), 0, Hash256::ZERO);
@@ -583,7 +585,9 @@ fn pre_gloas_proposal_epoch_ignored() {
 
     let current_slot = Slot::new(E::slots_per_epoch());
     let prefs = make_signed_preferences(current_slot + 1, 0, Hash256::ZERO);
-    let result = verify_preferences_consistency::<E>(&prefs.message, current_slot, &spec);
+    let clock = TestingSlotClock::new(Slot::new(0), Duration::ZERO, spec.get_slot_duration());
+    clock.set_slot(current_slot.as_u64());
+    let result = verify_preferences_consistency::<E, _>(&prefs.message, &clock, &spec);
     assert!(
         matches!(
             result,
@@ -603,6 +607,8 @@ fn gloas_proposal_epoch_passes_fork_check() {
 
     let current_slot = Slot::new(E::slots_per_epoch());
     let prefs = make_signed_preferences(current_slot + 1, 0, Hash256::ZERO);
-    let result = verify_preferences_consistency::<E>(&prefs.message, current_slot, &spec);
+    let clock = TestingSlotClock::new(Slot::new(0), Duration::ZERO, spec.get_slot_duration());
+    clock.set_slot(current_slot.as_u64());
+    let result = verify_preferences_consistency::<E, _>(&prefs.message, &clock, &spec);
     assert!(result.is_ok(), "got: {result:?}");
 }

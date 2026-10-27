@@ -774,6 +774,11 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                             parent_root,
                             slot,
                         });
+                        self.propagate_validation_result(
+                            message_id,
+                            peer_id,
+                            MessageAcceptance::Ignore,
+                        );
                     }
                     GossipDataColumnError::BlockRootUnknown {
                         block_root: unknown_block_root,
@@ -4324,6 +4329,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 | PayloadBidError::BuilderCantCoverBid { .. }
                 | PayloadBidError::BuilderExitPending { .. }
                 | PayloadBidError::InvalidGasLimit
+                | PayloadBidError::InclusionListBitsNotInclusive
                 | PayloadBidError::BeaconStateError(_)
                 | PayloadBidError::InternalError(_)
                 | PayloadBidError::InvalidBidSlot { .. }
