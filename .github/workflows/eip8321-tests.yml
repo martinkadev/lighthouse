@@ -1,0 +1,103 @@
+name: EIP-8321 tests
+
+on:
+  push:
+    branches: [eip8321-validator-integration]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eip8321-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "2"
+  CARGO_PROFILE_RELEASE_DEBUG: "0"
+  RUST_LOG: error
+  RAYON_NUM_THREADS: "2"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  ef-tests:
+    if: github.ref == 'refs/heads/eip8321-validator-integration'
+    name: EF / ${{ matrix.preset }} / ${{ matrix.crypto }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - preset: mainnet
+            crypto: real
+            features: ef_tests,portable
+          - preset: minimal
+            crypto: real
+            features: ef_tests,portable,spec-minimal
+          - preset: mainnet
+            crypto: fake
+            features: ef_tests,portable,fake_crypto
+          - preset: minimal
+            crypto: fake
+            features: ef_tests,portable,spec-minimal,fake_crypto
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate CI helpers
+        run: python3 -B -m unittest discover -s scripts/ci -p test_eip8321_ci.py -v
+      - name: Free runner disk for vectors and Rust build
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h .
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake clang libclang-dev pkg-config libssl-dev protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: eip8321-${{ matrix.preset }}-${{ matrix.crypto }}
+      - name: Download and verify pinned vectors
+        env:
+          PRESET: ${{ matrix.preset }}
+        run: |
+          mkdir -p ci-results
+          python3 testing/ef_tests/prepare_ci_vectors.py \
+            --preset "$PRESET" \
+            --output-dir testing/ef_tests/consensus-spec-tests \
+            --cache-dir "$RUNNER_TEMP/vector-downloads" \
+            2>&1 | tee ci-results/vectors.log
+      - name: Remove downloaded archives after extraction
+        run: rm -rf -- "$RUNNER_TEMP/vector-downloads"
+      - name: Run all EF tests
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: |
+          cargo nextest run --locked --release -p ef_tests \
+            --features "$FEATURES" --profile eip8321-ci \
+            2>&1 | tee ci-results/tests.log
+      - name: Write pass/fail summary
+        if: always()
+        run: python3 scripts/ci/summarize-eip8321.py target/nextest/eip8321-ci/junit.xml
+      - name: Upload logs and test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eip8321-${{ matrix.preset }}-${{ matrix.crypto }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ci-results/
+            target/nextest/eip8321-ci/junit.xml
+            testing/ef_tests/consensus-spec-tests/ci-vector-provenance.json

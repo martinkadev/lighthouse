@@ -89,3 +89,49 @@ python3 testing/ef_tests/generate_gloas_refresh_vectors.py \
   --specs-dir /path/to/consensus-specs --suite compliance --workers 4 \
   --output-dir /tmp/current-gloas-compliance
 ```
+
+## EIP-8321 branch CI
+
+`.github/workflows/eip8321-tests.yml` runs only on `eip8321-validator-integration`.
+A push starts four independent EF jobs: mainnet/minimal with real/fake cryptography.
+One job failing does not cancel the others. Tests within each job also continue
+on failure. Each job shows a pass/fail table and uploads logs, a JUnit report
+(including successful output and vector-level skips), and fixture provenance.
+
+The runners download `v1.7.0-eip8321.1` from `lukassta/consensus-specs`, plus
+`v0.1.1` BLS fixtures. Asset SHA-256 checksums are pinned in
+`ci-vectors.lock.json`. Only the selected preset, general vectors, BLS vectors,
+and (for minimal) Fulu/Gloas compliance vectors are installed. Archives and
+extracted vectors are never committed or uploaded as workflow artifacts.
+
+The release vectors are tested as published: local Gloas filtering/fast-confirmation/
+compliance regenerations are not silently applied. Therefore a successful local
+run with regenerated fixtures does not guarantee this release will pass. Inspect
+fixture provenance and errors before changing expectations or adding skips.
+The installer fails if the three EIP-8321 RANDAO suites or fork-upgrade inputs
+are absent, rather than silently running without feature coverage.
+
+After committing and pushing the workflow, open the repository's Actions tab,
+select **EIP-8321 tests**, and inspect each job. Use **Re-run all jobs** to repeat
+an existing run. A manual dispatch trigger is included, but its UI availability
+can depend on the workflow being present on the default branch; the push trigger
+works directly on this feature branch. Other branches cannot run these jobs.
+
+Rust 1.99.0 and nextest 0.9.146 match the versions used for local validation.
+Builds use Cargo.lock (`--locked`) and portable cryptography. The disposable
+runner removes unused Android/.NET/GHC/CodeQL SDKs to make room for vectors and
+Rust artifacts, and deletes downloaded archives after extraction. Standard GitHub
+runners use two build/test workers to bound memory use. No custom secrets or
+self-hosted runners are needed. The first build may take substantially longer
+than a cached run.
+
+For an isolated local download (never overwrite your existing vectors):
+
+```sh
+python3 testing/ef_tests/prepare_ci_vectors.py --preset mainnet \
+  --output-dir target/eip8321-release-mainnet \
+  --cache-dir target/eip8321-release-downloads
+```
+
+Use a disk-backed location with adequate free space; some systems mount `/tmp`
+as a small RAM filesystem. Extracted vectors are larger than the archives.

@@ -111,3 +111,19 @@ store-failure-output = true
 [profile.default-miri]
 # Miri tests take up a lot of memory, so only run 1 test at a time by default.
 test-threads = 4
+
+# Limited concurrency for standard GitHub-hosted runners. Retain successful output so
+# vector-level known/BLS skips remain inspectable in the downloaded JUnit report.
+[profile.eip8321-ci]
+test-threads = 2
+fail-fast = false
+retries = 0
+status-level = "pass"
+final-status-level = "pass"
+failure-output = "immediate-final"
+
+[profile.eip8321-ci.junit]
+path = "junit.xml"
+report-name = "eip8321-ef-tests"
+store-success-output = true
+store-failure-output = true
