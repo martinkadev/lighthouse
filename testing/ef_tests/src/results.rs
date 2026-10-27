@@ -5,7 +5,7 @@ use std::path::Path;
 pub fn assert_tests_pass(handler_name: &str, path: &Path, results: &[CaseResult]) {
     let (failed, skipped_bls, skipped_known_failures) = categorize_results(results);
 
-    if failed.len() + skipped_known_failures.len() > 0 {
+    if !failed.is_empty() || !skipped_known_failures.is_empty() || !skipped_bls.is_empty() {
         print_results(
             handler_name,
             &failed,
@@ -71,6 +71,14 @@ pub fn print_results(
         println!("-------");
         println!(
             "case ({}) from {} skipped because it's a known failure",
+            case.desc,
+            case.path.display()
+        );
+    }
+    for case in skipped_bls {
+        println!("-------");
+        println!(
+            "case ({}) from {} skipped because the cryptography configuration does not match",
             case.desc,
             case.path.display()
         );

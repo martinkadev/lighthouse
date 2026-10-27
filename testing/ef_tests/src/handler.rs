@@ -1171,8 +1171,14 @@ impl<E> GossipValidationHandler<E> {
         }
     }
 
-    pub fn latest_stable(handler_name: &'static str) -> Self {
-        Self::for_forks(handler_name, vec![ForkName::latest_stable()])
+    pub fn latest_stable_and_later(handler_name: &'static str) -> Self {
+        Self::for_forks(
+            handler_name,
+            ForkName::list_all()
+                .into_iter()
+                .filter(|fork| *fork >= ForkName::latest_stable())
+                .collect(),
+        )
     }
 }
 
@@ -1203,10 +1209,6 @@ impl<E: EthSpec + TypeName> Handler for GossipValidationHandler<E> {
 
     fn is_enabled_for_feature(&self, feature_name: FeatureName) -> bool {
         feature_name == FeatureName::Eip8321 && self.handler_path("eip8321").is_dir()
-    }
-
-    fn disabled_forks(&self) -> Vec<ForkName> {
-        vec![ForkName::Gloas]
     }
 }
 

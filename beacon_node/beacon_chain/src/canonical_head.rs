@@ -628,6 +628,16 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         self.cached_head_read_lock().clone()
     }
 
+    /// Reproduce the explicit head-state finality override exported by EF gossip fixtures.
+    /// This intentionally changes fixture state without changing its block's state root.
+    #[cfg(feature = "ef_tests")]
+    pub fn testing_set_head_state_finalized_checkpoint(&self, checkpoint: Checkpoint) {
+        let mut head = self.cached_head_write_lock();
+        *Arc::make_mut(&mut head.snapshot)
+            .beacon_state
+            .finalized_checkpoint_mut() = checkpoint;
+    }
+
     /// Access a read-lock for the cached head.
     ///
     /// This function is **not safe** to be public. See the module-level documentation for more

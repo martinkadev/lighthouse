@@ -975,33 +975,37 @@ fn gossip_attester_slashing() {
 
 #[test]
 fn gossip_voluntary_exit() {
-    GossipValidationHandler::<Spec>::latest_stable("gossip_voluntary_exit").run();
+    GossipValidationHandler::<Spec>::latest_stable_and_later("gossip_voluntary_exit").run();
 }
 
 #[test]
 fn gossip_beacon_attestation() {
-    GossipValidationHandler::<Spec>::latest_stable("gossip_beacon_attestation").run();
+    GossipValidationHandler::<Spec>::latest_stable_and_later("gossip_beacon_attestation").run();
 }
 
 #[test]
 fn gossip_beacon_aggregate_and_proof() {
-    GossipValidationHandler::<Spec>::latest_stable("gossip_beacon_aggregate_and_proof").run();
+    GossipValidationHandler::<Spec>::latest_stable_and_later("gossip_beacon_aggregate_and_proof")
+        .run();
 }
 
 #[test]
 fn gossip_bls_to_execution_change() {
-    GossipValidationHandler::<Spec>::latest_stable("gossip_bls_to_execution_change").run();
+    GossipValidationHandler::<Spec>::latest_stable_and_later("gossip_bls_to_execution_change")
+        .run();
 }
 
 #[test]
 fn gossip_sync_committee_message() {
-    GossipValidationHandler::<Spec>::latest_stable("gossip_sync_committee_message").run();
+    GossipValidationHandler::<Spec>::latest_stable_and_later("gossip_sync_committee_message").run();
 }
 
 #[test]
 fn gossip_sync_committee_contribution_and_proof() {
-    GossipValidationHandler::<Spec>::latest_stable("gossip_sync_committee_contribution_and_proof")
-        .run();
+    GossipValidationHandler::<Spec>::latest_stable_and_later(
+        "gossip_sync_committee_contribution_and_proof",
+    )
+    .run();
 }
 
 #[test]
@@ -1009,44 +1013,37 @@ fn gossip_randao_commitment_registration() {
     GossipValidationHandler::<Spec>::new("gossip_randao_commitment_registration").run();
 }
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_data_column_sidecar() {
-//     GossipValidationHandler::<Spec>::new("gossip_data_column_sidecar").run();
-// }
+#[test]
+fn gossip_data_column_sidecar() {
+    GossipValidationHandler::<Spec>::new("gossip_data_column_sidecar").run();
+}
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_execution_payload_bid() {
-//     GossipValidationHandler::<Spec>::new("gossip_execution_payload_bid").run();
-// }
+#[test]
+fn gossip_execution_payload_bid() {
+    GossipValidationHandler::<Spec>::new("gossip_execution_payload_bid").run();
+}
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_execution_payload_envelope() {
-//     GossipValidationHandler::<Spec>::new("gossip_execution_payload_envelope").run();
-// }
+#[test]
+fn gossip_execution_payload_envelope() {
+    GossipValidationHandler::<Spec>::new("gossip_execution_payload_envelope").run();
+}
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_inclusion_list() {
-//     GossipValidationHandler::<Spec>::new("gossip_inclusion_list").run();
-// }
+#[test]
+fn gossip_inclusion_list() {
+    GossipValidationHandler::<Spec>::new("gossip_inclusion_list").run();
+}
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_partial_data_column_sidecar() {
-//     GossipValidationHandler::<Spec>::new("gossip_partial_data_column_sidecar").run();
-// }
+#[test]
+fn gossip_partial_data_column_sidecar() {
+    GossipValidationHandler::<Spec>::new("gossip_partial_data_column_sidecar").run();
+}
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_payload_attestation_message() {
-//     GossipValidationHandler::<Spec>::new("gossip_payload_attestation_message").run();
-// }
+#[test]
+fn gossip_payload_attestation_message() {
+    GossipValidationHandler::<Spec>::new("gossip_payload_attestation_message").run();
+}
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_proposer_preferences() {
-//     GossipValidationHandler::<Spec>::new("gossip_proposer_preferences").run();
-// }
+#[test]
+fn gossip_proposer_preferences() {
+    GossipValidationHandler::<Spec>::new("gossip_proposer_preferences").run();
+}
