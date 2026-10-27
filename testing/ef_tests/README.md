@@ -50,3 +50,18 @@ files. You have several options for saving space:
    redownloading them.
 3. Delete everything (`make clean`). Good for updating to a new version, or if you no longer wish to
    run the EF tests.
+
+## Missing Gloas filtering vectors
+
+Some vector releases omit `gloas/fork_choice/filter_node_tree_variants` even though
+the experimental EIP-8321 export includes its own cases. To generate the missing
+minimal Gloas cases from a matching local consensus-specs checkout, run:
+
+```bash
+python3 testing/ef_tests/generate_gloas_filter_vectors.py --specs-dir /path/to/consensus-specs
+```
+
+The helper uses that checkout's `.venv/bin/python` (or `--python`), runs the official
+focused generator, checks the generated files, and records the source commit.
+It refuses to overwrite existing vectors. Review the recorded revision when
+comparing results from different spec checkouts.
