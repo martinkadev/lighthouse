@@ -72,6 +72,46 @@ mod tests {
     use types::{Domain, EthSpec, ForkName, Hash256, MinimalEthSpec, SigningData};
 
     #[tokio::test]
+    async fn registered_randao_proposer_requires_a_supported_reveal_path() {
+        type E = MinimalEthSpec;
+        let spec = Arc::new(ForkName::Heze.make_genesis_spec(E::default_spec()));
+        let harness = BeaconChainHarness::builder(E::default())
+            .spec(spec)
+            .deterministic_keypairs(64)
+            .fresh_ephemeral_store()
+            .mock_execution_layer()
+            .mock_execution_layer_all_payloads_valid()
+            .build();
+        let mut state = harness.get_current_state();
+        for index in 0..state.validators().len() {
+            *state
+                .randao_commitments_mut()
+                .unwrap()
+                .get_mut(index)
+                .unwrap() = Hash256::repeat_byte(42);
+        }
+        let result = harness
+            .chain
+            .produce_block_on_state_gloas(
+                state,
+                None,
+                harness.chain.head_beacon_block_root(),
+                proto_array::PayloadStatus::Empty,
+                None,
+                types::Slot::new(1),
+                bls::Signature::empty(),
+                crate::graffiti_calculator::GraffitiSettings::new(None, None),
+                crate::ProduceBlockVerification::VerifyRandao,
+                eth2::types::BuilderConfig::empty(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(crate::BlockProductionError::HashChainRandaoUnsupported)
+        ));
+    }
+
+    #[tokio::test]
     async fn randao_registration_gossip_pool_restart_and_branch_revalidation() {
         type E = MinimalEthSpec;
         let spec = Arc::new(ForkName::Heze.make_genesis_spec(E::default_spec()));

@@ -301,6 +301,7 @@ impl GossipTopic {
                 PROPOSER_PREFERENCES => GossipKind::ProposerPreferences,
                 EXECUTION_PROOF => GossipKind::ExecutionProof,
                 INCLUSION_LIST => GossipKind::InclusionList,
+                RANDAO_COMMITMENT_REGISTRATION => GossipKind::RandaoCommitmentRegistration,
                 LIGHT_CLIENT_FINALITY_UPDATE => GossipKind::LightClientFinalityUpdate,
                 LIGHT_CLIENT_OPTIMISTIC_UPDATE => GossipKind::LightClientOptimisticUpdate,
                 topic => match subnet_topic_index(topic) {
@@ -445,6 +446,7 @@ mod tests {
                 ProposerSlashing,
                 AttesterSlashing,
                 InclusionList,
+                RandaoCommitmentRegistration,
             ]
             .iter()
             {
