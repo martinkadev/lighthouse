@@ -65,3 +65,27 @@ The helper uses that checkout's `.venv/bin/python` (or `--python`), runs the off
 focused generator, checks the generated files, and records the source commit.
 It refuses to overwrite existing vectors. Review the recorded revision when
 comparing results from different spec checkouts.
+
+
+### Gloas vectors generated against an older spec
+
+Some vector snapshots predate the current Gloas FULL/PENDING fork-choice rules.
+The Gloas `is_one_confirmed` case with an empty slot and two consecutive attester
+slots is one example: older data expects slot 57, while the current source
+asserts slot 55. Refresh the entire case, including block/attestation inputs;
+changing only the expected head would mix two spec versions.
+
+`generate_gloas_refresh_vectors.py` runs the official local Python generators
+into a fresh directory and records the source revision. Use the spec checkout
+matching the implementation. Back up installed vectors before replacing them.
+The `compliance` suite regenerates the `small` minimal Gloas compliance dataset;
+it can take substantially longer than the Rust test run.
+
+```sh
+python3 testing/ef_tests/generate_gloas_refresh_vectors.py \
+  --specs-dir /path/to/consensus-specs --suite fast-confirmation \
+  --output-dir /tmp/current-gloas-fast-confirmation
+python3 testing/ef_tests/generate_gloas_refresh_vectors.py \
+  --specs-dir /path/to/consensus-specs --suite compliance --workers 4 \
+  --output-dir /tmp/current-gloas-compliance
+```
