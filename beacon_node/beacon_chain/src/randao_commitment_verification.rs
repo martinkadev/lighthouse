@@ -125,6 +125,29 @@ mod tests {
             vec![registration.clone()]
         );
 
+        // Exercise the actual proposal path, not only the pool's candidate getter.
+        let (contents, post_state) = harness.make_block(state.clone(), types::Slot::new(1)).await;
+        assert_eq!(
+            contents
+                .0
+                .message()
+                .body()
+                .randao_commitment_registrations()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            post_state
+                .pending_randao_commitments()
+                .unwrap()
+                .iter()
+                .any(
+                    |pending| pending.validator_index == registration.message.validator_index
+                        && pending.commitment == registration.message.commitment
+                )
+        );
+
         let mut included_branch = state.clone();
         process_randao_commitment_registration(
             &mut included_branch,
