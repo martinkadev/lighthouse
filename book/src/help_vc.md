@@ -156,6 +156,11 @@ Options:
       --web3-signer-max-idle-connections <COUNT>
           Maximum number of idle connections to maintain per web3signer host.
           Default is unlimited.
+      --randao-hash-chain-dir <RANDAO_HASH_CHAIN_DIR>
+          Opt in to irreversible experimental EIP-8321 hash-chain registration.
+          Store independent chain secrets in this directory. Back it up like
+          validator keys; loss or exhaustion permanently prevents proposals for
+          that index.
 
 Flags:
       --beacon-nodes-sync-tolerances <SYNC_TOLERANCES>
