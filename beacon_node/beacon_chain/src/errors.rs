@@ -347,7 +347,8 @@ pub enum BlockProductionError {
     HezeNotImplemented(String),
     /// EIP-8321: the proposer has registered a hash-chain commitment, but the validator client
     /// did not supply a `hash_chain_reveal` for this block.
-    HashChainRandaoUnsupported,
+    MissingHashChainReveal,
+    InvalidHashChainReveal,
 }
 
 easy_from_to!(BlockProcessingError, BlockProductionError);

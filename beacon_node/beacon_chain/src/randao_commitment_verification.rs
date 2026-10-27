@@ -72,7 +72,7 @@ mod tests {
     use types::{Domain, EthSpec, ForkName, Hash256, MinimalEthSpec, SigningData};
 
     #[tokio::test]
-    async fn registered_randao_proposer_requires_a_supported_reveal_path() {
+    async fn registered_randao_proposer_requires_a_reveal() {
         type E = MinimalEthSpec;
         let spec = Arc::new(ForkName::Heze.make_genesis_spec(E::default_spec()));
         let harness = BeaconChainHarness::builder(E::default())
@@ -107,7 +107,7 @@ mod tests {
             .await;
         assert!(matches!(
             result,
-            Err(crate::BlockProductionError::HashChainRandaoUnsupported)
+            Err(crate::BlockProductionError::MissingHashChainReveal)
         ));
     }
 

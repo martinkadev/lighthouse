@@ -890,9 +890,23 @@ pub struct InclusionListDuty {
     pub slot: Slot,
 }
 
+/// Experimental Lighthouse EIP-8321 proposal context. Never contains a secret preimage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RandaoProposalContext {
+    pub parent_root: Hash256,
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub validator_index: u64,
+    pub pubkey: PublicKeyBytes,
+    pub genesis_validators_root: Hash256,
+    pub commitment: Hash256,
+    pub pending_commitment: Option<Hash256>,
+}
+
 #[derive(Clone, Deserialize)]
 pub struct ValidatorBlocksQuery {
     pub randao_reveal: SignatureBytes,
+    /// Experimental EIP-8321 preimage, checked against the selected proposal parent.
+    pub hash_chain_reveal: Option<Hash256>,
     pub graffiti: Option<Graffiti>,
     pub skip_randao_verification: SkipRandaoVerification,
     pub include_payload: Option<bool>,

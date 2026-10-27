@@ -101,6 +101,29 @@ pub async fn create_validator_store(
     num_validators: usize,
     config: &ValidatorStoreConfig,
 ) -> (Arc<S>, Vec<PublicKeyBytes>, TempDir) {
+    create_validator_store_with_genesis(
+        slot_clock,
+        spec,
+        executor,
+        num_validators,
+        config,
+        Hash256::ZERO,
+    )
+    .await
+}
+
+pub async fn create_validator_store_with_genesis<E: EthSpec>(
+    slot_clock: ManualSlotClock,
+    spec: Arc<ChainSpec>,
+    executor: task_executor::TaskExecutor,
+    num_validators: usize,
+    config: &ValidatorStoreConfig,
+    genesis_validators_root: Hash256,
+) -> (
+    Arc<LighthouseValidatorStore<ManualSlotClock, E>>,
+    Vec<PublicKeyBytes>,
+    TempDir,
+) {
     let validator_dir = tempdir().unwrap();
     let password = b"test";
 
@@ -139,8 +162,11 @@ pub async fn create_validator_store(
         validator_definitions.push(validator_definition);
     }
 
+    let definitions =
+        account_utils::validator_definitions::ValidatorDefinitions::from(validator_definitions);
+    definitions.save(validator_dir.path()).unwrap();
     let initialized_validators = InitializedValidators::from_definitions(
-        validator_definitions.into(),
+        definitions,
         validator_dir.path().into(),
         Default::default(),
     )
@@ -156,7 +182,7 @@ pub async fn create_validator_store(
     let validator_store = Arc::new(LighthouseValidatorStore::<_, E>::new(
         initialized_validators,
         slashing_protection,
-        Hash256::ZERO,
+        genesis_validators_root,
         spec,
         None,
         slot_clock,

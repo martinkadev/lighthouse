@@ -36,10 +36,15 @@ use validator_store::{
     ValidatorStore,
 };
 
+mod randao_hash_chain;
+
 pub type Error = ValidatorStoreError<SigningError>;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Opt-in irreversible EIP-8321 registration; secrets must be independently backed up.
+    #[serde(default)]
+    pub randao_hash_chain_dir: Option<std::path::PathBuf>,
     /// Fallback fee recipient address.
     pub fee_recipient: Option<Address>,
     /// Fallback gas limit.
@@ -62,6 +67,7 @@ const SLASHING_PROTECTION_HISTORY_EPOCHS: u64 = 1;
 pub use types::DEFAULT_GAS_LIMIT;
 
 pub struct LighthouseValidatorStore<T, E> {
+    randao_hash_chain_dir: Option<std::path::PathBuf>,
     validators: Arc<RwLock<InitializedValidators>>,
     slashing_protection: SlashingDatabase,
     slashing_protection_last_prune: Arc<Mutex<Epoch>>,
@@ -94,6 +100,7 @@ impl<T: SlotClock + 'static, E: EthSpec> LighthouseValidatorStore<T, E> {
         task_executor: TaskExecutor,
     ) -> Self {
         Self {
+            randao_hash_chain_dir: config.randao_hash_chain_dir.clone(),
             validators: Arc::new(RwLock::new(validators)),
             slashing_protection,
             slashing_protection_last_prune: Arc::new(Mutex::new(Epoch::new(0))),
@@ -968,6 +975,100 @@ impl<T: SlotClock + 'static, E: EthSpec> ValidatorStore for LighthouseValidatorS
             // If builder boost factor is set to 100 it should be treated as None
             // to prevent unnecessary calculations that could lead to loss of information.
             .filter(|&factor| factor != 100)
+    }
+
+    fn hash_chain_randao_enabled(&self) -> bool {
+        self.randao_hash_chain_dir.is_some()
+    }
+
+    async fn prepare_randao_proposal(
+        &self,
+        pubkey: PublicKeyBytes,
+        epoch: Epoch,
+        context: eth2::types::RandaoProposalContext,
+    ) -> Result<validator_store::RandaoProposal, Error> {
+        let signing_method = self.doppelganger_checked_signing_method(pubkey)?;
+        if context.pubkey != pubkey
+            || context.genesis_validators_root != self.genesis_validators_root
+            || self.validator_index(&pubkey) != Some(context.validator_index)
+        {
+            return Err(Error::Middleware(
+                "RANDAO proposal context has the wrong validator or network".into(),
+            ));
+        }
+        let directory = self
+            .randao_hash_chain_dir
+            .clone()
+            .ok_or_else(|| Error::Middleware("Hash-chain RANDAO is disabled".into()))?;
+        let genesis = self.genesis_validators_root;
+        let index = context.validator_index;
+        let commitment = context.commitment;
+        let pending = context.pending_commitment;
+        let prepared = self
+            .task_executor
+            .spawn_blocking_handle(
+                move || {
+                    randao_hash_chain::prepare(
+                        &directory,
+                        genesis,
+                        pubkey,
+                        index,
+                        commitment,
+                        commitment == Hash256::ZERO && pending.is_none(),
+                    )
+                },
+                "prepare_randao_hash_chain",
+            )
+            .ok_or(Error::ExecutorError)?
+            .await
+            .map_err(|_| Error::ExecutorError)?
+            .map_err(Error::Middleware)?;
+        if pending.is_some_and(|tip| tip != prepared.tip) {
+            return Err(Error::Middleware(
+                "Pending RANDAO commitment does not match the stored chain".into(),
+            ));
+        }
+        if let Some(reveal) = prepared.reveal {
+            return Ok(validator_store::RandaoProposal {
+                bls_reveal: Signature::infinity()
+                    .map_err(|_| Error::Middleware("Unable to encode infinity signature".into()))?,
+                hash_chain_reveal: Some(reveal),
+                registration: None,
+            });
+        }
+        let registration = if pending.is_none() {
+            let message = types::RandaoCommitmentRegistration {
+                validator_index: index,
+                commitment: prepared.tip,
+            };
+            let version = self.spec.genesis_fork_version;
+            let context = SigningContext {
+                domain: Domain::RandaoCommitmentRegistration,
+                epoch: Epoch::new(0),
+                fork: Fork {
+                    previous_version: version,
+                    current_version: version,
+                    epoch: Epoch::new(0),
+                },
+                genesis_validators_root: genesis,
+            };
+            let signature = signing_method
+                .get_signature::<E, FullPayload<E>>(
+                    SignableMessage::RandaoCommitmentRegistration(&message),
+                    context,
+                    &self.spec,
+                    &self.task_executor,
+                )
+                .await?;
+            Some(types::SignedRandaoCommitmentRegistration { message, signature })
+        } else {
+            None
+        };
+        Ok(validator_store::RandaoProposal {
+            bls_reveal: self.randao_reveal(pubkey, epoch).await?,
+            hash_chain_reveal: None,
+            registration,
+        })
     }
 
     async fn randao_reveal(

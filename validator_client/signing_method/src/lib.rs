@@ -38,6 +38,7 @@ pub enum Error {
 /// Enumerates all messages that can be signed by a validator.
 pub enum SignableMessage<'a, E: EthSpec, Payload: AbstractExecPayload<E> = FullPayload<E>> {
     RandaoReveal(Epoch),
+    RandaoCommitmentRegistration(&'a RandaoCommitmentRegistration),
     BeaconBlock(&'a BeaconBlock<E, Payload>),
     AttestationData(&'a AttestationData),
     SignedAggregateAndProof(AggregateAndProofRef<'a, E>),
@@ -64,6 +65,14 @@ impl<E: EthSpec, Payload: AbstractExecPayload<E>> SignableMessage<'_, E, Payload
     pub fn signing_root(&self, domain: Hash256) -> Hash256 {
         match self {
             SignableMessage::RandaoReveal(epoch) => epoch.signing_root(domain),
+            SignableMessage::RandaoCommitmentRegistration(registration) => {
+                use tree_hash::TreeHash;
+                SigningData {
+                    object_root: registration.tree_hash_root(),
+                    domain,
+                }
+                .tree_hash_root()
+            }
             SignableMessage::BeaconBlock(b) => b.signing_root(domain),
             SignableMessage::AttestationData(a) => a.signing_root(domain),
             SignableMessage::SignedAggregateAndProof(a) => a.signing_root(domain),
@@ -214,6 +223,9 @@ impl SigningMethod {
 
                 // Map the message into a Web3Signer type.
                 let object = match signable_message {
+                    SignableMessage::RandaoCommitmentRegistration(registration) => {
+                        Web3SignerObject::RandaoCommitmentRegistration(registration)
+                    }
                     SignableMessage::RandaoReveal(epoch) => {
                         Web3SignerObject::RandaoReveal { epoch }
                     }

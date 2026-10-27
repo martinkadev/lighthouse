@@ -1513,3 +1513,37 @@ fn publish_proposer_preferences<T: BeaconChainTypes>(
         ))
     }
 }
+
+/// Experimental EIP-8321 registration submission. Identical retries are idempotent.
+pub fn post_randao_commitment_registration<T: BeaconChainTypes>(
+    eth_v1: EthV1Filter,
+    task_spawner_filter: TaskSpawnerFilter<T>,
+    chain_filter: ChainFilter<T>,
+    network_tx_filter: NetworkTxFilter<T>,
+) -> ResponseFilter {
+    eth_v1.and(warp::path("beacon")).and(warp::path("pool"))
+        .and(warp::path("randao_commitment_registrations")).and(warp::path::end())
+        .and(warp_utils::json::json()).and(task_spawner_filter)
+        .and(chain_filter).and(network_tx_filter)
+        .then(|registration: types::SignedRandaoCommitmentRegistration,
+            task_spawner: TaskSpawner<T::EthSpec>, chain: Arc<BeaconChain<T>>,
+            network_tx: UnboundedSender<NetworkMessage<T::EthSpec>>| {
+            task_spawner.blocking_response_task(Priority::P0, move || {
+                match chain.verify_and_import_randao_commitment_registration(registration.clone()) {
+                    Ok(()) => {},
+                    Err(beacon_chain::randao_commitment_verification::RandaoCommitmentGossipError::AlreadySeen) => {
+                        if !chain.op_pool.all_randao_commitment_registrations().iter().any(|stored| stored == &registration) {
+                            return Err(warp_utils::reject::custom_bad_request("A different RANDAO registration is already pooled for this validator".into()));
+                        }
+                    },
+
+                    Err(error) => return Err(warp_utils::reject::custom_bad_request(format!("Invalid RANDAO registration: {error:?}"))),
+                }
+                // An earlier request may have pooled the registration but failed to publish.
+                // Identical retries must retry publication as well as acknowledge the pool entry.
+                crate::utils::publish_pubsub_message(&network_tx,
+                    PubsubMessage::RandaoCommitmentRegistration(Box::new(registration)))?;
+                Ok(warp::reply())
+            })
+        }).boxed()
+}

@@ -3010,6 +3010,31 @@ impl BeaconNodeHttpClient {
         opt_response.ok_or(Error::StatusCode(StatusCode::NOT_FOUND))
     }
 
+    /// Experimental EIP-8321 context for the selected proposal parent, advanced to `slot`.
+    pub async fn get_randao_proposal_context(
+        &self,
+        slot: Slot,
+    ) -> Result<RandaoProposalContext, Error> {
+        let mut path = self.server.expose_full().clone();
+        path.path_segments_mut()
+            .map_err(|()| Error::InvalidUrl(self.server.clone()))?
+            .pop_if_empty()
+            .extend(["lighthouse", "randao", &slot.to_string()]);
+        self.get(path).await
+    }
+
+    /// Validate, pool and gossip a signed EIP-8321 registration.
+    pub async fn post_randao_commitment_registration(
+        &self,
+        registration: &::types::SignedRandaoCommitmentRegistration,
+    ) -> Result<(), Error> {
+        let mut path = self.eth_path(V1)?;
+        path.path_segments_mut()
+            .map_err(|()| Error::InvalidUrl(self.server.clone()))?
+            .extend(["beacon", "pool", "randao_commitment_registrations"]);
+        self.post(path, registration).await
+    }
+
     /// returns the `POST v4/validator/blocks/{slot}` URL path
     #[allow(clippy::too_many_arguments)]
     pub async fn post_validator_blocks_v4_path(
@@ -3020,6 +3045,28 @@ impl BeaconNodeHttpClient {
         skip_randao_verification: SkipRandaoVerification,
         include_payload: bool,
         graffiti_policy: Option<GraffitiPolicy>,
+    ) -> Result<Url, Error> {
+        self.post_validator_blocks_v4_path_with_hash_chain(
+            slot,
+            randao_reveal,
+            graffiti,
+            skip_randao_verification,
+            include_payload,
+            graffiti_policy,
+            None,
+        )
+        .await
+    }
+
+    pub async fn post_validator_blocks_v4_path_with_hash_chain(
+        &self,
+        slot: Slot,
+        randao_reveal: &SignatureBytes,
+        graffiti: Option<&Graffiti>,
+        skip_randao_verification: SkipRandaoVerification,
+        include_payload: bool,
+        graffiti_policy: Option<GraffitiPolicy>,
+        hash_chain_reveal: Option<Hash256>,
     ) -> Result<Url, Error> {
         let mut path = self.eth_path(V4)?;
 
@@ -3053,6 +3100,10 @@ impl BeaconNodeHttpClient {
                 .append_pair("graffiti_policy", "PreserveUserGraffiti");
         }
 
+        if let Some(reveal) = hash_chain_reveal {
+            path.query_pairs_mut()
+                .append_pair("hash_chain_reveal", &format!("{reveal:?}"));
+        }
         Ok(path)
     }
 
@@ -3068,7 +3119,31 @@ impl BeaconNodeHttpClient {
         graffiti_policy: Option<GraffitiPolicy>,
         fork_name: ForkName,
     ) -> Result<(ProduceBlockV4Response<E>, ProduceBlockV4Metadata), Error> {
-        self.post_validator_blocks_v4_modular(
+        self.post_validator_blocks_v4_with_hash_chain::<E>(
+            slot,
+            randao_reveal,
+            graffiti,
+            include_payload,
+            builder_config,
+            graffiti_policy,
+            fork_name,
+            None,
+        )
+        .await
+    }
+
+    pub async fn post_validator_blocks_v4_with_hash_chain<E: EthSpec>(
+        &self,
+        slot: Slot,
+        randao_reveal: &SignatureBytes,
+        graffiti: Option<&Graffiti>,
+        include_payload: bool,
+        builder_config: &BuilderConfig,
+        graffiti_policy: Option<GraffitiPolicy>,
+        fork_name: ForkName,
+        hash_chain_reveal: Option<Hash256>,
+    ) -> Result<(ProduceBlockV4Response<E>, ProduceBlockV4Metadata), Error> {
+        self.post_validator_blocks_v4_modular_with_hash_chain(
             slot,
             randao_reveal,
             graffiti,
@@ -3077,6 +3152,7 @@ impl BeaconNodeHttpClient {
             builder_config,
             graffiti_policy,
             fork_name,
+            hash_chain_reveal,
         )
         .await
     }
@@ -3101,14 +3177,41 @@ impl BeaconNodeHttpClient {
         graffiti_policy: Option<GraffitiPolicy>,
         fork_name: ForkName,
     ) -> Result<(ProduceBlockV4Response<E>, ProduceBlockV4Metadata), Error> {
+        self.post_validator_blocks_v4_modular_with_hash_chain::<E>(
+            slot,
+            randao_reveal,
+            graffiti,
+            skip_randao_verification,
+            include_payload,
+            builder_config,
+            graffiti_policy,
+            fork_name,
+            None,
+        )
+        .await
+    }
+
+    pub async fn post_validator_blocks_v4_modular_with_hash_chain<E: EthSpec>(
+        &self,
+        slot: Slot,
+        randao_reveal: &SignatureBytes,
+        graffiti: Option<&Graffiti>,
+        skip_randao_verification: SkipRandaoVerification,
+        include_payload: bool,
+        builder_config: &BuilderConfig,
+        graffiti_policy: Option<GraffitiPolicy>,
+        fork_name: ForkName,
+        hash_chain_reveal: Option<Hash256>,
+    ) -> Result<(ProduceBlockV4Response<E>, ProduceBlockV4Metadata), Error> {
         let path = self
-            .post_validator_blocks_v4_path(
+            .post_validator_blocks_v4_path_with_hash_chain(
                 slot,
                 randao_reveal,
                 graffiti,
                 skip_randao_verification,
                 include_payload,
                 graffiti_policy,
+                hash_chain_reveal,
             )
             .await?;
 
@@ -3163,7 +3266,31 @@ impl BeaconNodeHttpClient {
         graffiti_policy: Option<GraffitiPolicy>,
         fork_name: ForkName,
     ) -> Result<(ProduceBlockV4Response<E>, ProduceBlockV4Metadata), Error> {
-        self.post_validator_blocks_v4_modular_ssz::<E>(
+        self.post_validator_blocks_v4_ssz_with_hash_chain::<E>(
+            slot,
+            randao_reveal,
+            graffiti,
+            include_payload,
+            builder_config,
+            graffiti_policy,
+            fork_name,
+            None,
+        )
+        .await
+    }
+
+    pub async fn post_validator_blocks_v4_ssz_with_hash_chain<E: EthSpec>(
+        &self,
+        slot: Slot,
+        randao_reveal: &SignatureBytes,
+        graffiti: Option<&Graffiti>,
+        include_payload: bool,
+        builder_config: &BuilderConfig,
+        graffiti_policy: Option<GraffitiPolicy>,
+        fork_name: ForkName,
+        hash_chain_reveal: Option<Hash256>,
+    ) -> Result<(ProduceBlockV4Response<E>, ProduceBlockV4Metadata), Error> {
+        self.post_validator_blocks_v4_modular_ssz_with_hash_chain::<E>(
             slot,
             randao_reveal,
             graffiti,
@@ -3172,6 +3299,7 @@ impl BeaconNodeHttpClient {
             builder_config,
             graffiti_policy,
             fork_name,
+            hash_chain_reveal,
         )
         .await
     }
@@ -3191,14 +3319,41 @@ impl BeaconNodeHttpClient {
         graffiti_policy: Option<GraffitiPolicy>,
         fork_name: ForkName,
     ) -> Result<(ProduceBlockV4Response<E>, ProduceBlockV4Metadata), Error> {
+        self.post_validator_blocks_v4_modular_ssz_with_hash_chain::<E>(
+            slot,
+            randao_reveal,
+            graffiti,
+            skip_randao_verification,
+            include_payload,
+            builder_config,
+            graffiti_policy,
+            fork_name,
+            None,
+        )
+        .await
+    }
+
+    pub async fn post_validator_blocks_v4_modular_ssz_with_hash_chain<E: EthSpec>(
+        &self,
+        slot: Slot,
+        randao_reveal: &SignatureBytes,
+        graffiti: Option<&Graffiti>,
+        skip_randao_verification: SkipRandaoVerification,
+        include_payload: bool,
+        builder_config: &BuilderConfig,
+        graffiti_policy: Option<GraffitiPolicy>,
+        fork_name: ForkName,
+        hash_chain_reveal: Option<Hash256>,
+    ) -> Result<(ProduceBlockV4Response<E>, ProduceBlockV4Metadata), Error> {
         let path = self
-            .post_validator_blocks_v4_path(
+            .post_validator_blocks_v4_path_with_hash_chain(
                 slot,
                 randao_reveal,
                 graffiti,
                 skip_randao_verification,
                 include_payload,
                 graffiti_policy,
+                hash_chain_reveal,
             )
             .await?;
 

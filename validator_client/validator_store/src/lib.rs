@@ -74,7 +74,30 @@ pub struct ProposalData {
     pub builder_proposals: bool,
 }
 
+pub struct RandaoProposal {
+    pub bls_reveal: Signature,
+    pub hash_chain_reveal: Option<Hash256>,
+    pub registration: Option<types::SignedRandaoCommitmentRegistration>,
+}
+
 pub trait ValidatorStore: Send + Sync {
+    fn hash_chain_randao_enabled(&self) -> bool {
+        false
+    }
+
+    fn prepare_randao_proposal(
+        &self,
+        _pubkey: PublicKeyBytes,
+        _epoch: Epoch,
+        _context: eth2::types::RandaoProposalContext,
+    ) -> impl Future<Output = Result<RandaoProposal, Error<Self::Error>>> + Send {
+        async {
+            Err(Error::Middleware(
+                "Hash-chain RANDAO is not enabled in this validator store".into(),
+            ))
+        }
+    }
+
     type Error: Debug + Send + Sync;
     type E: EthSpec;
 
