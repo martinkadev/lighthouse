@@ -24,10 +24,10 @@ use std::time::Duration;
 use types::{
     AttesterSlashing, BeaconBlock, BeaconState, BlobSchedule, BlockImportSource, ChainSpec,
     Checkpoint, EthSpec, ExecPayload, ForkName, Hash256, ProposerSlashing, SignedAggregateAndProof,
-    SignedAggregateAndProofElectra, SignedBeaconBlock, SignedBlsToExecutionChange,
-    SignedContributionAndProof, SignedExecutionPayloadEnvelope, SignedInclusionList,
-    SignedRandaoCommitmentRegistration, SignedVoluntaryExit, SingleAttestation, Slot, SubnetId,
-    SyncCommitteeMessage, SyncSubnetId,
+    SignedAggregateAndProofElectra, SignedAggregateAndProofGloas, SignedBeaconBlock,
+    SignedBlsToExecutionChange, SignedContributionAndProof, SignedExecutionPayloadEnvelope,
+    SignedInclusionList, SignedRandaoCommitmentRegistration, SignedVoluntaryExit,
+    SingleAttestation, Slot, SubnetId, SyncCommitteeMessage, SyncSubnetId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -52,6 +52,9 @@ impl PartialEq<MessageAcceptance> for ExpectedOutcome {
 #[derive(Debug, Clone, Deserialize)]
 struct Meta {
     topic: Topic,
+    /// Legacy vectors express message time as a base plus an offset.
+    #[serde(default)]
+    current_time_ms: Option<u64>,
     #[serde(default)]
     blocks: Vec<SetupBlock>,
     #[serde(default)]
@@ -75,6 +78,8 @@ struct SetupBlock {
     block: String,
     #[serde(default)]
     failed: bool,
+    #[serde(default)]
+    pending: bool,
     #[serde(default)]
     payload_status: Option<PayloadStatus>,
     /// Signed execution payload envelope supplied alongside the block (Gloas+ networking vectors).
@@ -101,6 +106,8 @@ enum FinalizedCheckpoint {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MessageMeta {
+    #[serde(default)]
+    offset_ms: Option<u64>,
     message: String,
     expected: ExpectedOutcome,
     #[serde(default)]
@@ -228,6 +235,18 @@ impl<E: EthSpec> GossipTester<E> {
         tester.set_time_ms(current_time_ms)?;
         tester.import_setup_blocks(case, &blocks, initial_block_index)?;
         tester.set_finalized_checkpoint(case.finalized_checkpoint(&blocks)?);
+        // Keep pending EL verdicts pending when head recomputation sends forkchoiceUpdated.
+        if case
+            .meta
+            .blocks
+            .iter()
+            .any(|block| block.payload_status == Some(PayloadStatus::NotValidated))
+        {
+            if let Some(el) = &tester.harness.mock_execution_layer {
+                el.server.all_payloads_syncing_on_forkchoice_updated();
+            }
+        }
+        tester.block_on_dangerous(tester.harness.chain.recompute_head_at_current_slot())?;
 
         // This upstream case pre-populates its Python Seen set but does not export it.
         // Reproduce that setup through a validated prior registration, before processing
@@ -345,8 +364,29 @@ impl<E: EthSpec> GossipTester<E> {
             let block = blocks.get(&setup_block.block).ok_or_else(|| {
                 Error::FailedToParseTest(format!("unknown block file {}", setup_block.block))
             })?;
+            if setup_block.pending {
+                // A queued block is known, but has neither a post-state nor a fork-choice entry.
+                self.harness
+                    .chain
+                    .store
+                    .put_block(&block.canonical_root(), block.clone())
+                    .map_err(|e| Error::InternalError(format!("storing pending block: {e:?}")))?;
+                continue;
+            }
             if initial_block_index != Some(index) {
-                self.import_setup_block(block.clone(), setup_block.payload_status)?;
+                self.import_setup_block(
+                    block.clone(),
+                    if block
+                        .message()
+                        .body()
+                        .signed_execution_payload_bid()
+                        .is_ok()
+                    {
+                        None
+                    } else {
+                        setup_block.payload_status
+                    },
+                )?;
             }
             if let Some(payload_name) = &setup_block.payload {
                 let envelope = self.payload_envelopes.get(payload_name).ok_or_else(|| {
@@ -354,7 +394,7 @@ impl<E: EthSpec> GossipTester<E> {
                         "unknown payload envelope file {payload_name}"
                     ))
                 })?;
-                self.import_setup_payload(block, envelope)?;
+                self.import_setup_payload(block, envelope, setup_block.payload_status)?;
             }
         }
 
@@ -493,7 +533,7 @@ impl<E: EthSpec> GossipTester<E> {
         peer_id: PeerId,
     ) -> Result<(), Error> {
         let block = Arc::new(load_beacon_block(path, &message_meta.message, &self.spec)?);
-        let time_ms = self.message_time_ms(message_meta);
+        let time_ms = self.message_time_ms(message_meta)?;
         let seen_duration = self.set_time_ms(time_ms)?;
 
         let process_fn = Box::pin(self.network_beacon_processor.clone().process_gossip_block(
@@ -564,10 +604,23 @@ impl<E: EthSpec> GossipTester<E> {
         message_id: MessageId,
         peer_id: PeerId,
     ) -> Result<(), Error> {
-        let aggregate = ssz_decode_file::<SignedAggregateAndProofElectra<E>>(
-            &path.join(format!("{}.ssz_snappy", message_meta.message)),
-        )
-        .map(SignedAggregateAndProof::Electra)?;
+        let message_path = path.join(format!("{}.ssz_snappy", message_meta.message));
+        let aggregate = if self
+            .spec
+            .fork_name_at_slot::<E>(
+                self.harness
+                    .chain
+                    .slot()
+                    .map_err(|e| Error::InternalError(format!("slot: {e:?}")))?,
+            )
+            .gloas_enabled()
+        {
+            ssz_decode_file::<SignedAggregateAndProofGloas<E>>(&message_path)
+                .map(SignedAggregateAndProof::Gloas)?
+        } else {
+            ssz_decode_file::<SignedAggregateAndProofElectra<E>>(&message_path)
+                .map(SignedAggregateAndProof::Electra)?
+        };
         let seen_timestamp = self.set_message_time(message_meta)?;
 
         self.network_beacon_processor
@@ -607,13 +660,13 @@ impl<E: EthSpec> GossipTester<E> {
     ) -> Result<(), Error> {
         let inclusion_list: SignedInclusionList =
             ssz_decode_file(&path.join(format!("{}.ssz_snappy", message_meta.message)))?;
-        self.set_message_time(message_meta)?;
+        let seen_timestamp = self.set_message_time(message_meta)?;
 
         self.network_beacon_processor.process_gossip_inclusion_list(
             message_id,
             peer_id,
             Box::new(inclusion_list),
-            Duration::from_millis(self.current_time_ms),
+            seen_timestamp,
         );
         Ok(())
     }
@@ -681,12 +734,28 @@ impl<E: EthSpec> GossipTester<E> {
     }
 
     fn set_message_time(&self, message_meta: &MessageMeta) -> Result<Duration, Error> {
-        let time_ms = self.message_time_ms(message_meta);
+        let time_ms = self.message_time_ms(message_meta)?;
         self.set_time_ms(time_ms)
     }
 
-    fn message_time_ms(&self, message_meta: &MessageMeta) -> u64 {
-        message_meta.current_time_ms.unwrap_or(self.current_time_ms)
+    fn message_time_ms(&self, message_meta: &MessageMeta) -> Result<u64, Error> {
+        if let Some(time_ms) = message_meta.current_time_ms {
+            if message_meta.offset_ms.is_some() {
+                return Err(Error::FailedToParseTest(
+                    "conflicting message time formats".into(),
+                ));
+            }
+            return time_ms
+                .checked_sub(
+                    self.genesis_time
+                        .checked_mul(1000)
+                        .ok_or_else(|| Error::FailedToParseTest("genesis time overflow".into()))?,
+                )
+                .ok_or_else(|| Error::FailedToParseTest("message precedes genesis".into()));
+        }
+        self.current_time_ms
+            .checked_add(message_meta.offset_ms.unwrap_or(0))
+            .ok_or_else(|| Error::FailedToParseTest("message time overflow".into()))
     }
 
     fn validation_result(
@@ -774,6 +843,7 @@ impl<E: EthSpec> GossipTester<E> {
         &self,
         block: &SignedBeaconBlock<E>,
         envelope: &SignedExecutionPayloadEnvelope<E>,
+        payload_status: Option<PayloadStatus>,
     ) -> Result<(), Error> {
         let block_root = block.canonical_root();
         let state_root = block.state_root();
@@ -827,7 +897,14 @@ impl<E: EthSpec> GossipTester<E> {
             .fork_choice_write_lock()
             .on_payload_envelope_received(
                 block_root,
-                PayloadVerificationStatus::Verified,
+                if matches!(
+                    payload_status,
+                    Some(PayloadStatus::NotValidated | PayloadStatus::Invalidated)
+                ) {
+                    PayloadVerificationStatus::Optimistic
+                } else {
+                    PayloadVerificationStatus::Verified
+                },
                 block_hash,
                 true,
             )
@@ -836,6 +913,14 @@ impl<E: EthSpec> GossipTester<E> {
                     "on_payload_envelope_received for {block_root:?} failed: {e:?}"
                 ))
             })?;
+        if payload_status == Some(PayloadStatus::Invalidated) {
+            self.block_on_dangerous(self.harness.chain.process_invalid_execution_payload(
+                &InvalidationOperation::InvalidateOne {
+                    head_hash: block_hash,
+                },
+            ))?
+            .map_err(|e| Error::InternalError(format!("invalidating setup payload: {e:?}")))?;
+        }
 
         Ok(())
     }
@@ -1035,6 +1120,9 @@ impl<E: EthSpec> GossipValidation<E> {
         blocks: &HashMap<String, SignedBeaconBlock<E>>,
         spec: &ChainSpec,
     ) -> Result<u64, Error> {
+        if let Some(time_ms) = self.meta.current_time_ms {
+            return Ok(time_ms);
+        }
         let slot = self
             .meta
             .blocks
