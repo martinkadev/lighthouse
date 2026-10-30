@@ -329,11 +329,24 @@ impl<E: EthSpec> GossipVerifiedPayloadBid<E> {
         let bid_parent = BidParent::from_bid(signed_bid.message());
         let bid_parent_block_root = signed_bid.message().parent_block_root();
         let bid_value = signed_bid.message().value();
-        let current_slot = ctx
+        // Gossip permits both the current and next slot with inclusive clock disparity.
+        let now = ctx
             .slot_clock
-            .now()
+            .now_duration()
             .ok_or(PayloadBidError::UnableToReadSlot)?;
-        verify_bid_slot(bid_slot, current_slot)?;
+        let earliest = ctx
+            .slot_clock
+            .start_of(bid_slot.saturating_sub(1_u64))
+            .ok_or(PayloadBidError::UnableToReadSlot)?
+            .saturating_sub(ctx.spec.maximum_gossip_clock_disparity());
+        let latest = ctx
+            .slot_clock
+            .start_of(bid_slot.saturating_add(1_u64))
+            .and_then(|end| end.checked_add(ctx.spec.maximum_gossip_clock_disparity()))
+            .ok_or(PayloadBidError::UnableToReadSlot)?;
+        if now < earliest || now > latest {
+            return Err(PayloadBidError::InvalidBidSlot { bid_slot });
+        }
 
         if ctx
             .gossip_verified_payload_bid_cache
@@ -480,7 +493,22 @@ impl<E: EthSpec> GossipVerifiedPayloadBid<E> {
             return Err(PayloadBidError::InvalidPrevRandao { slot: bid_slot });
         }
 
-        verify_bid_state_conditions(signed_bid.message(), head_state, ctx.spec)?;
+        // Epoch processing at the proposal slot can release pending builder payments.
+        // Validate coverability against that advanced state, as block processing will.
+        let mut proposal_state = head_state.clone();
+        if proposal_state.slot() < bid_slot {
+            state_processing::state_advance::partial_state_advance(
+                &mut proposal_state,
+                Some(cached_head.head_state_root()),
+                bid_slot,
+                None,
+                ctx.spec,
+            )
+            .map_err(|error| {
+                PayloadBidError::InternalError(format!("bid state advance: {error:?}"))
+            })?;
+        }
+        verify_bid_state_conditions(signed_bid.message(), &proposal_state, ctx.spec)?;
 
         if parent_payload_exits_builder::<T>(
             signed_bid.message(),
@@ -503,21 +531,21 @@ impl<E: EthSpec> GossipVerifiedPayloadBid<E> {
             let inclusion_list_slot = bid_slot.saturating_sub(1u64);
             let inclusion_list_epoch = inclusion_list_slot.epoch(T::EthSpec::slots_per_epoch());
             let relative_epoch =
-                RelativeEpoch::from_epoch(head_state.current_epoch(), inclusion_list_epoch)
+                RelativeEpoch::from_epoch(proposal_state.current_epoch(), inclusion_list_epoch)
                     .map_err(|e| {
                         PayloadBidError::InternalError(format!(
                             "inclusion list epoch {inclusion_list_epoch} out of range: {e:?}"
                         ))
                     })?;
-
-            // determine inclusion list dependent root and committee necessary for determining
-            // the inclusion list bits for the inclusivity check
-            let inclusion_list_dependent_root = head_state.attester_shuffling_decision_root(
-                signed_bid.message().parent_block_root(),
-                relative_epoch,
-            )?;
+            proposal_state.build_committee_cache(relative_epoch, ctx.spec)?;
+            let inclusion_list_dependent_root = proposal_state
+                .proposer_shuffling_decision_root_at_epoch(
+                    inclusion_list_epoch,
+                    cached_head.head_block_root(),
+                    ctx.spec,
+                )?;
             let inclusion_list_committee =
-                head_state.get_inclusion_list_committee(inclusion_list_slot)?;
+                proposal_state.get_inclusion_list_committee(inclusion_list_slot)?;
 
             // Only the timely inclusion lists count on gossip
             let local_inclusion_list_bits = ctx

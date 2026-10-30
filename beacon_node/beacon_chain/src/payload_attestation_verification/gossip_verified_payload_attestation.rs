@@ -249,6 +249,18 @@ fn verify_propagation_slot_range<S: SlotClock>(
         .now_with_past_tolerance(spec.maximum_gossip_clock_disparity())
         .ok_or(BeaconChainError::UnableToReadSlot)?;
     if message_slot < earliest_permissible_slot {
+        // The spec includes the exact end-of-slot + disparity boundary. Converting
+        // (now - disparity) to a slot rounds that instant up to the following slot.
+        let inclusive_end = slot_clock
+            .start_of(message_slot.saturating_add(1_u64))
+            .and_then(|end| end.checked_add(spec.maximum_gossip_clock_disparity()))
+            .ok_or(BeaconChainError::UnableToReadSlot)?;
+        let now = slot_clock
+            .now_duration()
+            .ok_or(BeaconChainError::UnableToReadSlot)?;
+        if now <= inclusive_end {
+            return Ok(());
+        }
         return Err(Error::PastSlot {
             message_slot,
             earliest_permissible_slot,
@@ -256,4 +268,36 @@ fn verify_propagation_slot_range<S: SlotClock>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod payload_attestation_timing_tests {
+    use super::*;
+    use slot_clock::TestingSlotClock;
+    use std::time::Duration;
+    use types::{ForkName, MinimalEthSpec};
+
+    #[test]
+    fn payload_attestation_timing_includes_both_disparity_boundaries() {
+        let spec = ForkName::Heze.make_genesis_spec(MinimalEthSpec::default_spec());
+        let clock = TestingSlotClock::from_spec::<MinimalEthSpec>(Duration::ZERO, &spec);
+        let start = clock.start_of(Slot::new(1)).unwrap().as_millis() as u64;
+        let end = clock.start_of(Slot::new(2)).unwrap().as_millis() as u64;
+        let disparity = spec.maximum_gossip_clock_disparity().as_millis() as u64;
+        for (time_ms, accepted) in [
+            (start - disparity - 1, false),
+            (start - disparity, true),
+            (start, true),
+            (end, true),
+            (end + disparity, true),
+            (end + disparity + 1, false),
+        ] {
+            clock.set_current_time(Duration::from_millis(time_ms));
+            assert_eq!(
+                verify_propagation_slot_range(&clock, Slot::new(1), &spec).is_ok(),
+                accepted,
+                "incorrect payload-attestation timing outcome at {time_ms}ms"
+            );
+        }
+    }
 }

@@ -1014,46 +1014,40 @@ fn gossip_randao_commitment_registration() {
     GossipValidationHandler::<Spec>::new("gossip_randao_commitment_registration").run();
 }
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_data_column_sidecar() {
-//     GossipValidationHandler::<Spec>::new("gossip_data_column_sidecar").run();
-// }
+#[test]
+fn gossip_data_column_sidecar() {
+    GossipValidationHandler::<Spec>::new("gossip_data_column_sidecar").run();
+}
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_execution_payload_bid() {
-//     GossipValidationHandler::<Spec>::new("gossip_execution_payload_bid").run();
-// }
+#[test]
+fn gossip_execution_payload_bid() {
+    GossipValidationHandler::<Spec>::new("gossip_execution_payload_bid").run();
+}
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_execution_payload_envelope() {
-//     GossipValidationHandler::<Spec>::new("gossip_execution_payload_envelope").run();
-// }
+#[test]
+fn gossip_execution_payload_envelope() {
+    GossipValidationHandler::<Spec>::new("gossip_execution_payload_envelope").run();
+}
 
 #[test]
 fn gossip_inclusion_list() {
     GossipValidationHandler::<Spec>::new("gossip_inclusion_list").run();
 }
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_partial_data_column_sidecar() {
-//     GossipValidationHandler::<Spec>::new("gossip_partial_data_column_sidecar").run();
-// }
+#[test]
+fn gossip_partial_data_column_sidecar() {
+    GossipValidationHandler::<Spec>::new("gossip_partial_data_column_sidecar").run();
+}
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_payload_attestation_message() {
-//     GossipValidationHandler::<Spec>::new("gossip_payload_attestation_message").run();
-// }
+#[test]
+fn gossip_payload_attestation_message() {
+    GossipValidationHandler::<Spec>::new("gossip_payload_attestation_message").run();
+}
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_proposer_preferences() {
-//     GossipValidationHandler::<Spec>::new("gossip_proposer_preferences").run();
-// }
+#[test]
+fn gossip_proposer_preferences() {
+    GossipValidationHandler::<Spec>::new("gossip_proposer_preferences").run();
+}
 
 // Focused feature suites fail if vectors are missing rather than silently skipping them.
 #[test]
@@ -1076,10 +1070,12 @@ fn eip8321_upgrade() {
     ForkHandler::<Spec>::default().run_for_feature(FeatureName::Eip8321);
 }
 #[test]
+#[cfg(not(feature = "fake_crypto"))]
 fn eip8321_sanity_blocks() {
     SanityBlocksHandler::<Spec>::default().run_for_feature(FeatureName::Eip8321);
 }
 #[test]
+#[cfg(not(feature = "fake_crypto"))]
 fn eip8321_sanity_slots() {
     SanitySlotsHandler::<Spec>::default().run_for_feature(FeatureName::Eip8321);
 }
