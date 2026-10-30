@@ -29,7 +29,7 @@ jobs:
   ef-tests:
     if: github.ref == 'refs/heads/eip8321-heze-integration'
     name: EF / ${{ matrix.preset }} / ${{ matrix.crypto }}
-    runs-on: ubuntu-24.04
+    runs-on: self-hosted
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -51,15 +51,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate CI helpers
         run: python3 -B -m unittest discover -s scripts/ci -p test_eip8321_ci.py -v
-      - name: Free runner disk for vectors and Rust build
+      # Install system dependencies once on the Linux/WSL runner host.
+      # Do not delete host software or invoke sudo from unattended jobs.
+      - name: Check runner prerequisites
         run: |
-          test "$GITHUB_ACTIONS" = true
-          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h .
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake clang libclang-dev pkg-config libssl-dev protobuf-compiler
+          test "$RUNNER_OS" = Linux
+          for tool in python3 curl cc c++ cmake clang pkg-config protoc; do
+            command -v "$tool"
+          done
+          python3 -c 'import sys; assert sys.version_info >= (3, 12), "Python 3.12+ required"'
+          pkg-config --exists openssl
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.0
