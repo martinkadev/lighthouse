@@ -67,8 +67,8 @@ genesis = { workspace = true }
 initialized_validators = { workspace = true }
 lighthouse_validator_store = { workspace = true }
 proto_array = { workspace = true }
-ssz_types = { workspace = true }
 slashing_protection = { workspace = true }
+ssz_types = { workspace = true }
 tempfile = { workspace = true }
 validator_store = { workspace = true }
 validator_test_rig = { workspace = true }

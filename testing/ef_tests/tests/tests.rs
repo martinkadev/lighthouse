@@ -1054,3 +1054,37 @@ fn gossip_inclusion_list() {
 // fn gossip_proposer_preferences() {
 //     GossipValidationHandler::<Spec>::new("gossip_proposer_preferences").run();
 // }
+
+// Focused feature suites fail if vectors are missing rather than silently skipping them.
+#[test]
+fn eip8321_randao() {
+    OperationsHandler::<Spec, RandaoBlock<Spec>>::default().run_for_feature(FeatureName::Eip8321);
+}
+#[test]
+fn eip8321_registration() {
+    OperationsHandler::<Spec, RandaoCommitmentRegistrationOperation>::default()
+        .run_for_feature(FeatureName::Eip8321);
+}
+#[test]
+fn eip8321_activation() {
+    EpochProcessingHandler::<Spec, PendingRandaoCommitments>::default()
+        .run_for_feature(FeatureName::Eip8321);
+}
+#[test]
+#[cfg(not(feature = "fake_crypto"))]
+fn eip8321_upgrade() {
+    ForkHandler::<Spec>::default().run_for_feature(FeatureName::Eip8321);
+}
+#[test]
+fn eip8321_sanity_blocks() {
+    SanityBlocksHandler::<Spec>::default().run_for_feature(FeatureName::Eip8321);
+}
+#[test]
+fn eip8321_sanity_slots() {
+    SanitySlotsHandler::<Spec>::default().run_for_feature(FeatureName::Eip8321);
+}
+#[test]
+fn eip8321_registration_gossip() {
+    GossipValidationHandler::<Spec>::new("gossip_randao_commitment_registration")
+        .run_for_feature(FeatureName::Eip8321);
+}

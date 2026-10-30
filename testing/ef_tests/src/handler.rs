@@ -5,7 +5,7 @@ use context_deserialize::ContextDeserialize;
 use educe::Educe;
 use std::fs::{self, DirEntry};
 use std::marker::PhantomData;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use types::{BeaconState, EthSpec, ForkName};
 
 pub trait Handler {
@@ -138,19 +138,39 @@ pub trait Handler {
                 .filter(|e| e.file_type().map(|ty| ty.is_dir()).unwrap())
         };
 
+        let mut skipped_cases = Vec::new();
         let test_cases = fs::read_dir(&handler_path)
             .unwrap_or_else(|e| panic!("handler dir {} exists: {:?}", handler_path.display(), e))
             .filter_map(as_directory)
             .flat_map(|suite| fs::read_dir(suite.path()).expect("suite dir exists"))
             .filter_map(as_directory)
-            .map(|test_case_dir| {
+            .filter_map(|test_case_dir| {
                 let path = test_case_dir.path();
+                if is_assertion_only_randao_case(
+                    feature_name,
+                    Self::runner_name(),
+                    &self.handler_name(),
+                    &path,
+                ) {
+                    skipped_cases.push(path);
+                    return None;
+                }
                 let case = Self::Case::load_from_dir(&path, fork_name).expect("test should load");
-                (path, case)
+                Some((path, case))
             })
             .collect();
 
-        let results = Cases { test_cases }.test_results(fork_name, Self::rayon_enabled());
+        let mut results = Cases { test_cases }.test_results(fork_name, Self::rayon_enabled());
+        for path in skipped_cases {
+            results.push(crate::CaseResult {
+                case_index: results.len(),
+                desc: "Python assertion-only case emits no SSZ vectors; covered by the native \
+                    hash_chain_reveal_consumes_one_link_per_block regression test"
+                    .into(),
+                path,
+                result: Err(crate::Error::SkippedKnownFailure),
+            });
+        }
 
         let name = format!(
             "{}/{}/{}",
@@ -775,6 +795,19 @@ impl<E: EthSpec + TypeName> Handler for ForkChoiceHandler<E> {
             return false;
         }
 
+        // This newer handler is present in the EIP-8321 export but absent from some
+        // published Gloas vector releases. Keep the feature cases enabled independently.
+        if fork_name == ForkName::Gloas
+            && self.handler_name == "filter_node_tree_variants"
+            && !self.handler_path(&fork_name.to_string()).is_dir()
+        {
+            println!(
+                "Skipped gloas/fork_choice/filter_node_tree_variants: vector directory unavailable: {}",
+                self.handler_path(&fork_name.to_string()).display()
+            );
+            return false;
+        }
+
         // These tests check block validity (which may include signatures) and there is no need to
         // run them with fake crypto.
         cfg!(not(feature = "fake_crypto"))
@@ -1390,5 +1423,84 @@ impl<E: EthSpec + TypeName, O: Operation<E>> Handler for OperationsHandler<E, O>
 
     fn handler_name(&self) -> String {
         O::handler_name()
+    }
+}
+
+/// One upstream Python test only asserts state changes and never yields an operation vector.
+/// Accept its manifest-only export explicitly; any actual fixture data keeps normal strict loading.
+fn is_assertion_only_randao_case(
+    feature: FeatureName,
+    runner: &str,
+    handler: &str,
+    path: &Path,
+) -> bool {
+    if feature != FeatureName::Eip8321
+        || runner != "operations"
+        || handler != "randao"
+        || path.file_name().and_then(|name| name.to_str())
+            != Some("hash_chain_reveal_consumes_one_link_per_block")
+    {
+        return false;
+    }
+    let Ok(mut entries) = fs::read_dir(path) else {
+        return false;
+    };
+    matches!(entries.next(), Some(Ok(entry)) if entry.file_name() == "manifest.yaml"
+        && entry.file_type().is_ok_and(|kind| kind.is_file()))
+        && entries.next().is_none()
+}
+
+#[cfg(test)]
+mod vector_discovery_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn assertion_only_randao_skip_is_narrow_and_visible() {
+        let root = std::env::temp_dir().join(format!(
+            "lighthouse-vector-discovery-{}-{}",
+            std::process::id(),
+            NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = root.join("hash_chain_reveal_consumes_one_link_per_block");
+        fs::create_dir_all(&path).unwrap();
+        fs::write(
+            path.join("manifest.yaml"),
+            "case: hash_chain_reveal_consumes_one_link_per_block\n",
+        )
+        .unwrap();
+        let feature = FeatureName::Eip8321;
+        assert!(is_assertion_only_randao_case(
+            feature,
+            "operations",
+            "randao",
+            &path
+        ));
+        assert!(!is_assertion_only_randao_case(
+            feature, "sanity", "blocks", &path
+        ));
+        assert!(!is_assertion_only_randao_case(
+            feature,
+            "operations",
+            "deposit",
+            &path
+        ));
+        fs::write(path.join("block.ssz_snappy"), []).unwrap();
+        assert!(
+            !is_assertion_only_randao_case(feature, "operations", "randao", &path),
+            "a partial vector must remain an error rather than become a skip"
+        );
+        fs::remove_file(path.join("block.ssz_snappy")).unwrap();
+        fs::remove_file(path.join("manifest.yaml")).unwrap();
+        assert!(!is_assertion_only_randao_case(
+            feature,
+            "operations",
+            "randao",
+            &path
+        ));
+        fs::remove_dir(&path).unwrap();
+        fs::remove_dir(&root).unwrap();
     }
 }

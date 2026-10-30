@@ -643,6 +643,9 @@ mod tests {
             !core_topics_to_subscribe::<E>(ForkName::Gloas, &config, &spec)
                 .contains(&GossipKind::RandaoCommitmentRegistration)
         );
+        let heze_topics = core_topics_to_subscribe::<E>(ForkName::Heze, &config, &spec);
+        assert!(heze_topics.contains(&GossipKind::InclusionList));
+        assert!(!heze_topics.contains(&GossipKind::RandaoCommitmentRegistration));
         assert!(
             core_topics_to_subscribe::<E>(ForkName::Eip8321, &config, &spec)
                 .contains(&GossipKind::RandaoCommitmentRegistration)

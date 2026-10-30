@@ -41,7 +41,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Err(RandaoCommitmentGossipError::AlreadySeen);
         }
         let head = self.head_snapshot();
-        if !head.beacon_state.fork_name_unchecked().eip8321_enabled() {
+        if !head.beacon_state.fork_name_unchecked().eip8321_enabled()
+            || head.beacon_state.fork().current_version < self.spec.eip8321_fork_version
+        {
             return Err(RandaoCommitmentGossipError::PreFork);
         }
         let mut state = head.beacon_state.clone();

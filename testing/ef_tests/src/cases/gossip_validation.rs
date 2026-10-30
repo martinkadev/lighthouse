@@ -229,6 +229,27 @@ impl<E: EthSpec> GossipTester<E> {
         tester.import_setup_blocks(case, &blocks, initial_block_index)?;
         tester.set_finalized_checkpoint(case.finalized_checkpoint(&blocks)?);
 
+        // This upstream case pre-populates its Python Seen set but does not export it.
+        // Reproduce that setup through a validated prior registration, before processing
+        // the actual fixture message. No expected outcome is used to change validation.
+        if case.meta.topic == Topic::RandaoCommitmentRegistration
+            && case.path.file_name().and_then(|name| name.to_str())
+                == Some("gossip_randao_commitment_registration__ignore_already_seen")
+        {
+            let message = case.meta.messages.first().ok_or_else(|| {
+                Error::FailedToParseTest("seen-registration fixture has no message".into())
+            })?;
+            let registration: SignedRandaoCommitmentRegistration =
+                ssz_decode_file(&case.path.join(format!("{}.ssz_snappy", message.message)))?;
+            tester
+                .harness
+                .chain
+                .verify_and_import_randao_commitment_registration(registration)
+                .map_err(|e| {
+                    Error::InternalError(format!("unable to prepare seen registration: {e:?}"))
+                })?;
+        }
+
         Ok(tester)
     }
 
@@ -930,14 +951,6 @@ impl<E: EthSpec> GossipValidation<E> {
             "gossip_beacon_block__reject_parent_consensus_failed_execution_not_verified",
             "gossip_beacon_block__reject_parent_failed_validation",
         ];
-        const IGNORED_RANDAO_REGISTRATION_CASES: &[&str] = &[
-            // The harness cannot construct a prior gossip event, so the "already seen" precondition
-            // is unreachable (the message is delivered exactly once).
-            "gossip_randao_commitment_registration__ignore_already_seen",
-            // Eip8321 is activated at genesis in the harness spec, so a pre-fork head state cannot
-            // be constructed through the production import path.
-            "gossip_randao_commitment_registration__ignore_pre_eip8321_head_state",
-        ];
         const IGNORED_INCLUSION_LIST_CASES: &[&str] = &[
             // Timing-boundary fixture that the production-backed harness cannot reproduce (the
             // imported state is anchored at the slot start rather than the upper disparity bound).
@@ -959,9 +972,7 @@ impl<E: EthSpec> GossipValidation<E> {
         match self.meta.topic {
             Topic::BeaconBlock => IGNORED_BEACON_BLOCK_CASES.contains(&case_name),
             Topic::InclusionList => IGNORED_INCLUSION_LIST_CASES.contains(&case_name),
-            Topic::RandaoCommitmentRegistration => {
-                IGNORED_RANDAO_REGISTRATION_CASES.contains(&case_name)
-            }
+            Topic::RandaoCommitmentRegistration => false,
             Topic::BeaconAttestation | Topic::BeaconAggregateAndProof => {
                 // These vectors require fixture history that the production-backed harness cannot
                 // construct: a retained consensus-invalid block, an unknown finalized root, or a

@@ -1749,7 +1749,7 @@ mod tests {
         use crate::core::Spec;
         ssz_and_tree_hash_tests!(BeaconBlockBodyAltair<Spec>);
     }
-    mod heze {
+    mod heze_manual_root {
         use super::super::*;
         use crate::block::BeaconBlock;
         use crate::core::{ChainSpec, Spec};
