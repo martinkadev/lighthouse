@@ -964,6 +964,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             | BlockError::InconsistentFork(_)
             | BlockError::Slashable
             | BlockError::InvalidBlobCount { .. }
+            | BlockError::BidParentExecutionHashMismatch { .. }
             | BlockError::BidParentRootMismatch { .. }) => {
                 debug!(
                     msg = "peer sent invalid block",
@@ -1108,6 +1109,7 @@ fn block_error_penalty(e: &BlockError) -> Option<(PeerAction, WhichPeerToPenaliz
         | BlockError::KnownInvalidExecutionPayload(_)
         | BlockError::Slashable
         | BlockError::InvalidBlobCount { .. }
+        | BlockError::BidParentExecutionHashMismatch { .. }
         | BlockError::BidParentRootMismatch { .. } => block_peer_penalty(e),
     }
 }

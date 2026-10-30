@@ -183,6 +183,10 @@ pub enum Error {
     /// The attestation may be valid once the payload envelope is retrieved; it's unclear if the
     /// attestation is valid or not, so it is ignored (not penalized) pending the envelope.
     UnknownPayloadEnvelope { beacon_block_root: Hash256 },
+    /// The envelope is known but its execution verdict is still pending. Ignore without penalty.
+    OptimisticPayload { beacon_block_root: Hash256 },
+    /// The attestation claims a payload that the execution engine marked invalid. Reject it.
+    InvalidPayload { beacon_block_root: Hash256 },
     /// The `attestation.data.beacon_block_root` block is from before the finalized checkpoint.
     ///
     /// ## Peer scoring
@@ -640,6 +644,9 @@ impl<'a, T: BeaconChainTypes> IndexedAggregatedAttestation<'a, T> {
         //
         // Whilst this attestation *technically* could be used to add value to a block, it is
         // invalid in the spirit of the protocol. Here we choose safety over profit.
+        if fork_name.gloas_enabled() {
+            verify_attested_payload_status(chain, attestation.data())?;
+        }
         verify_attestation_target_root::<T::EthSpec>(&head_block, attestation.data())?;
 
         // Ensure that the attestation has participants.
@@ -972,6 +979,9 @@ impl<'a, T: BeaconChainTypes> IndexedUnaggregatedAttestation<'a, T> {
         }
 
         // Check the attestation target root is consistent with the head root.
+        if fork_name.gloas_enabled() {
+            verify_attested_payload_status(chain, &attestation.data)?;
+        }
         verify_attestation_target_root::<T::EthSpec>(&head_block, &attestation.data)?;
 
         Ok(())
@@ -1288,6 +1298,30 @@ fn verify_head_block_is_known<T: BeaconChainTypes>(
         Err(Error::UnknownHeadBlock {
             beacon_block_root: attestation_data.beacon_block_root,
         })
+    }
+}
+
+/// A received envelope does not imply its execution payload has been validated.
+fn verify_attested_payload_status<T: BeaconChainTypes>(
+    chain: &BeaconChain<T>,
+    data: &AttestationData,
+) -> Result<(), Error> {
+    if data.index != 1 {
+        return Ok(());
+    }
+    let status = chain
+        .canonical_head
+        .fork_choice_read_lock()
+        .get_block_execution_status_assuming_full(&data.beacon_block_root)
+        .map_err(BeaconChainError::ForkChoiceError)?;
+    match status {
+        Some(proto_array::ExecutionVerdict::Valid) => Ok(()),
+        Some(proto_array::ExecutionVerdict::Invalid) => Err(Error::InvalidPayload {
+            beacon_block_root: data.beacon_block_root,
+        }),
+        Some(proto_array::ExecutionVerdict::Optimistic) | None => Err(Error::OptimisticPayload {
+            beacon_block_root: data.beacon_block_root,
+        }),
     }
 }
 

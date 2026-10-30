@@ -325,10 +325,12 @@ pub enum BlockError {
         max_blobs_at_epoch: usize,
         block: usize,
     },
+    /// The bid extends neither the parent's full payload nor its empty execution head.
+    /// The block is invalid and the peer should be penalized.
+    BidParentExecutionHashMismatch {
+        parent_block_hash: ExecutionBlockHash,
+    },
     /// The bid's parent_block_root does not match the block's parent_root.
-    ///
-    /// ## Peer scoring
-    ///
     /// The block is invalid and the peer should be penalized.
     BidParentRootMismatch {
         bid_parent_root: Hash256,
@@ -1004,6 +1006,18 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
             });
         }
 
+        // A child can extend the parent's full payload or its empty execution head only.
+        if let Ok(bid) = block.message().body().signed_execution_payload_bid() {
+            let parent_hash = bid.message().parent_block_hash();
+            if parent_block.execution_payload_block_hash.is_some()
+                && Some(parent_hash) != parent_block.execution_payload_block_hash
+                && Some(parent_hash) != parent_block.execution_payload_parent_hash
+            {
+                return Err(BlockError::BidParentExecutionHashMismatch {
+                    parent_block_hash: parent_hash,
+                });
+            }
+        }
         drop(fork_choice_read_lock);
 
         // Track the number of skip slots between the block and its parent.
