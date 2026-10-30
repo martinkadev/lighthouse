@@ -7,6 +7,7 @@ use crate::per_block_processing::errors::{
 use crate::{ConsensusContext, ContextError};
 use bls::{PublicKey, PublicKeyBytes, SignatureSet, verify_signature_sets};
 use std::borrow::Cow;
+use types::consts::heze::UNSET_RANDAO_COMMITMENT;
 use types::{
     AbstractExecPayload, BeaconState, BeaconStateError, ChainSpec, EthSpec, Hash256,
     SignedBeaconBlock,
@@ -205,17 +206,43 @@ where
         Ok(())
     }
 
-    /// Includes the randao signature for `self.block` for verification.
+    /// Includes the legacy BLS RANDAO signature for unregistered proposers.
+    ///
+    /// Registered EIP-8321 proposers use hash-chain reveals. Their reveal and infinity
+    /// signature are checked by `process_randao`, even when BLS signatures are bulk verified.
     pub fn include_randao_reveal<Payload: AbstractExecPayload<E>>(
         &mut self,
         block: &'a SignedBeaconBlock<E, Payload>,
         verified_proposer_index: Option<u64>,
     ) -> Result<()> {
+        let proposer_index = match verified_proposer_index {
+            Some(index) => index,
+            None => self
+                .state
+                .get_beacon_proposer_index(block.slot(), self.spec)? as u64,
+        };
+        if proposer_index != block.message().proposer_index() {
+            return Err(Error::IncorrectBlockProposer {
+                block: block.message().proposer_index(),
+                local_shuffling: proposer_index,
+            });
+        }
+
+        if self
+            .state
+            .randao_commitments()
+            .ok()
+            .and_then(|commitments| commitments.get(proposer_index as usize))
+            .is_some_and(|commitment| *commitment != UNSET_RANDAO_COMMITMENT)
+        {
+            return Ok(());
+        }
+
         let set = randao_signature_set(
             self.state,
             self.get_pubkey.clone(),
             block.message(),
-            verified_proposer_index,
+            Some(proposer_index),
             self.spec,
         )?;
         self.sets.push(set);
@@ -458,5 +485,186 @@ impl<'a> ParallelSignatureSets<'a> {
     #[must_use]
     pub fn verify(self) -> bool {
         verify_signature_sets(self.sets.iter())
+    }
+}
+
+#[cfg(all(test, not(feature = "fake_crypto")))]
+mod tests {
+    use super::*;
+    use crate::VerifySignatures;
+    use crate::per_block_processing::{process_hash_chain_randao, process_randao};
+    use bls::Signature;
+    use milhouse::ProgressiveList;
+    use types::consts::heze::HASH_CHAIN_RANDAO_DST;
+    use types::test_utils::{generate_deterministic_keypair, test_arbitrary_instance};
+    use types::{BeaconBlock, BeaconStateEip8321, ForkName, MinimalEthSpec, Slot};
+
+    fn randao_fixture(commitment: Hash256) -> (BeaconState<MinimalEthSpec>, ChainSpec) {
+        let spec = ForkName::Eip8321.make_genesis_spec(MinimalEthSpec::default_spec());
+        let mut state: BeaconStateEip8321<MinimalEthSpec> = test_arbitrary_instance();
+        state.slot = Slot::new(0);
+        state.randao_commitments = ProgressiveList::new(vec![commitment]).unwrap();
+        (BeaconState::Eip8321(state), spec)
+    }
+
+    #[test]
+    fn bulk_randao_registered_proposer_uses_hash_chain() {
+        let reveal = Hash256::repeat_byte(42);
+        let mut preimage = HASH_CHAIN_RANDAO_DST.to_vec();
+        preimage.extend_from_slice(reveal.as_slice());
+        let commitment = Hash256::from_slice(blake3::hash(&preimage).as_bytes());
+        let (mut state, spec) = randao_fixture(commitment);
+        let mut block = BeaconBlock::<MinimalEthSpec>::empty(&spec);
+        *block.body_mut().randao_reveal_mut() = Signature::infinity().unwrap();
+        *block.body_mut().hash_chain_reveal_mut().unwrap() = reveal;
+        let signed_block = SignedBeaconBlock::from_block(block, Signature::empty());
+        let mut verifier = BlockSignatureVerifier::new(&state, |_| None, |_| None, &spec);
+        verifier
+            .include_randao_reveal(&signed_block, Some(0))
+            .unwrap();
+        assert!(verifier.sets.sets.is_empty());
+        drop(verifier);
+
+        // Bulk verification disables legacy BLS verification, but must still validate
+        // and apply the hash-chain reveal.
+        let mut ctxt = ConsensusContext::new(state.slot()).set_proposer_index(0);
+        process_randao(
+            &mut state,
+            signed_block.message(),
+            VerifySignatures::False,
+            &mut ctxt,
+            &spec,
+        )
+        .unwrap();
+        assert_eq!(state.randao_commitments().unwrap().get(0), Some(&reveal));
+    }
+
+    #[test]
+    fn bulk_randao_unregistered_proposer_still_requires_bls() {
+        let (state, spec) = randao_fixture(UNSET_RANDAO_COMMITMENT);
+        let keypair = generate_deterministic_keypair(0);
+        let mut block = BeaconBlock::<MinimalEthSpec>::empty(&spec);
+        // A block-controlled hash-chain field must not bypass the BLS check.
+        *block.body_mut().hash_chain_reveal_mut().unwrap() = Hash256::repeat_byte(42);
+        *block.body_mut().randao_reveal_mut() = Signature::infinity().unwrap();
+        let signed_block = SignedBeaconBlock::from_block(block, Signature::empty());
+        let mut verifier = BlockSignatureVerifier::new(
+            &state,
+            |_| Some(Cow::Borrowed(&keypair.pk)),
+            |_| None,
+            &spec,
+        );
+        verifier
+            .include_randao_reveal(&signed_block, Some(0))
+            .unwrap();
+        assert_eq!(verifier.sets.sets.len(), 1);
+        assert_eq!(verifier.verify(), Err(Error::SignatureInvalid));
+    }
+
+    #[test]
+    fn bulk_randao_registered_proposer_rejects_wrong_proposer() {
+        let (state, spec) = randao_fixture(Hash256::repeat_byte(42));
+        let mut block = BeaconBlock::<MinimalEthSpec>::empty(&spec);
+        *block.proposer_index_mut() = 1;
+        let signed_block = SignedBeaconBlock::from_block(block, Signature::empty());
+        let mut verifier = BlockSignatureVerifier::new(&state, |_| None, |_| None, &spec);
+        assert_eq!(
+            verifier.include_randao_reveal(&signed_block, Some(0)),
+            Err(Error::IncorrectBlockProposer {
+                block: 1,
+                local_shuffling: 0
+            })
+        );
+    }
+
+    #[test]
+    fn bulk_randao_hash_chain_validation_remains_required() {
+        let reveal = Hash256::repeat_byte(42);
+        let mut preimage = HASH_CHAIN_RANDAO_DST.to_vec();
+        preimage.extend_from_slice(reveal.as_slice());
+        let commitment = Hash256::from_slice(blake3::hash(&preimage).as_bytes());
+        let (mut state, spec) = randao_fixture(commitment);
+        let mut block = BeaconBlock::<MinimalEthSpec>::empty(&spec);
+        *block.body_mut().randao_reveal_mut() = Signature::infinity().unwrap();
+        // An empty reveal and an incorrect non-empty reveal must both fail.
+        for invalid_reveal in [Hash256::ZERO, Hash256::repeat_byte(43)] {
+            *block.body_mut().hash_chain_reveal_mut().unwrap() = invalid_reveal;
+            let mut ctxt = ConsensusContext::new(state.slot()).set_proposer_index(0);
+            assert!(
+                process_randao(
+                    &mut state,
+                    block.to_ref(),
+                    VerifySignatures::False,
+                    &mut ctxt,
+                    &spec
+                )
+                .is_err()
+            );
+        }
+        // A valid reveal still requires the legacy signature to be infinity.
+        *block.body_mut().hash_chain_reveal_mut().unwrap() = reveal;
+        *block.body_mut().randao_reveal_mut() = Signature::empty();
+        assert!(process_hash_chain_randao(&mut state, block.to_ref(), 0, commitment).is_err());
+        assert_eq!(
+            state.randao_commitments().unwrap().get(0),
+            Some(&commitment)
+        );
+    }
+    #[test]
+    fn hash_chain_reveal_consumes_one_link_per_block() {
+        let hash_link = |reveal: Hash256| {
+            let mut bytes = HASH_CHAIN_RANDAO_DST.to_vec();
+            bytes.extend_from_slice(reveal.as_slice());
+            Hash256::from_slice(blake3::hash(&bytes).as_bytes())
+        };
+        let second_reveal = Hash256::repeat_byte(42);
+        let first_reveal = hash_link(second_reveal);
+        let (mut state, spec) = randao_fixture(hash_link(first_reveal));
+        let mut block = BeaconBlock::<MinimalEthSpec>::empty(&spec);
+        *block.body_mut().randao_reveal_mut() = Signature::infinity().unwrap();
+
+        for (slot, reveal) in [(Slot::new(0), first_reveal), (Slot::new(1), second_reveal)] {
+            *state.slot_mut() = slot;
+            *block.slot_mut() = slot;
+            *block.body_mut().hash_chain_reveal_mut().unwrap() = reveal;
+            let mut mix_preimage = state
+                .get_randao_mix(state.current_epoch())
+                .unwrap()
+                .as_slice()
+                .to_vec();
+            mix_preimage.extend_from_slice(reveal.as_slice());
+            let expected_mix = Hash256::from_slice(blake3::hash(&mix_preimage).as_bytes());
+            let mut ctxt = ConsensusContext::new(slot).set_proposer_index(0);
+            process_randao(
+                &mut state,
+                block.to_ref(),
+                VerifySignatures::False,
+                &mut ctxt,
+                &spec,
+            )
+            .unwrap();
+            assert_eq!(state.randao_commitments().unwrap().get(0), Some(&reveal));
+            assert_eq!(
+                state.get_randao_mix(state.current_epoch()).unwrap(),
+                &expected_mix
+            );
+
+            // Replaying a consumed link cannot advance the chain or change the mix.
+            assert!(
+                process_randao(
+                    &mut state,
+                    block.to_ref(),
+                    VerifySignatures::False,
+                    &mut ctxt,
+                    &spec
+                )
+                .is_err()
+            );
+            assert_eq!(state.randao_commitments().unwrap().get(0), Some(&reveal));
+            assert_eq!(
+                state.get_randao_mix(state.current_epoch()).unwrap(),
+                &expected_mix
+            );
+        }
     }
 }

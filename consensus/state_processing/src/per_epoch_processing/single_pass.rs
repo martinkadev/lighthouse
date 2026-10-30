@@ -467,6 +467,13 @@ pub fn process_epoch_single_pass<E: EthSpec>(
 
     // Process consolidations outside the single-pass loop, as they depend on balances for multiple
     // validators and cannot be computed accurately inside the loop.
+    // [New in Heze:EIP-8321] Apply activated hash-chain RANDAO commitments. This runs after the
+    // per-validator loop; `process_slashings` does not read these lists, so the ordering relative
+    // to slashings is observably equivalent to the spec.
+    if fork_name.eip8321_enabled() && conf.registry_updates {
+        super::process_pending_randao_commitments(state, spec)?;
+    }
+
     if fork_name.electra_enabled() && conf.pending_consolidations {
         process_pending_consolidations(
             state,

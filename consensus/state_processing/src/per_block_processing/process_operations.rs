@@ -4,12 +4,15 @@ use crate::common::{
     get_attestation_participation_flag_indices, increase_balance, initiate_validator_exit,
     slash_validator,
 };
-use crate::per_block_processing::errors::{BlockProcessingError, ExitInvalid, IntoWithIndex};
+use crate::per_block_processing::errors::{
+    BlockProcessingError, ExitInvalid, IntoWithIndex, RandaoCommitmentRegistrationInvalidReason,
+};
 use crate::per_block_processing::verify_payload_attestation::verify_payload_attestation;
 use ssz_types::FixedVector;
 use typenum::U33;
 use types::consts::altair::{PARTICIPATION_FLAG_WEIGHTS, PROPOSER_WEIGHT, WEIGHT_DENOMINATOR};
 use types::consts::gloas::PAYLOAD_BUILDER_VERSION;
+use types::consts::heze::UNSET_RANDAO_COMMITMENT;
 use types::is_builder_withdrawal_credential;
 
 pub fn process_operations<E: EthSpec, Payload: AbstractExecPayload<E>>(
@@ -85,6 +88,112 @@ pub fn process_operations<E: EthSpec, Payload: AbstractExecPayload<E>>(
         )?;
     }
 
+    // [New in EIP8321]
+    if state.fork_name_unchecked().eip8321_enabled()
+        && let Ok(registrations) = block_body.randao_commitment_registrations()
+    {
+        for registration in registrations.iter() {
+            process_randao_commitment_registration(state, registration, verify_signatures, spec)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates a `SignedRandaoCommitmentRegistration` against a state without mutating it.
+///
+/// Shared by block processing and gossip validation.
+///
+/// [New in Eip8321: EIP-8321]
+pub fn verify_randao_commitment_registration<E: EthSpec>(
+    state: &BeaconState<E>,
+    signed_registration: &SignedRandaoCommitmentRegistration,
+    verify_signatures: VerifySignatures,
+    spec: &ChainSpec,
+) -> Result<(), BlockProcessingError> {
+    let registration = &signed_registration.message;
+    let index = registration.validator_index as usize;
+
+    let invalid =
+        |reason| BlockProcessingError::RandaoCommitmentRegistrationInvalid { index, reason };
+
+    block_verify!(
+        index < state.validators().len(),
+        invalid(RandaoCommitmentRegistrationInvalidReason::ValidatorUnknown)
+    );
+    block_verify!(
+        registration.commitment != UNSET_RANDAO_COMMITMENT,
+        invalid(RandaoCommitmentRegistrationInvalidReason::CommitmentUnset)
+    );
+    block_verify!(
+        state
+            .randao_commitments()?
+            .get(index)
+            .copied()
+            .unwrap_or(UNSET_RANDAO_COMMITMENT)
+            == UNSET_RANDAO_COMMITMENT,
+        invalid(RandaoCommitmentRegistrationInvalidReason::CommitmentAlreadySet)
+    );
+    block_verify!(
+        !state
+            .pending_randao_commitments()?
+            .iter()
+            .any(|pending| pending.validator_index == registration.validator_index),
+        invalid(RandaoCommitmentRegistrationInvalidReason::CommitmentAlreadyPending)
+    );
+
+    if verify_signatures.is_true() {
+        let validator = state
+            .validators()
+            .get(index)
+            .ok_or_else(|| invalid(RandaoCommitmentRegistrationInvalidReason::ValidatorUnknown))?;
+        let pubkey = validator
+            .pubkey
+            .decompress()
+            .map_err(|_| invalid(RandaoCommitmentRegistrationInvalidReason::BadSignature))?;
+        // The registration domain is fork-agnostic: `compute_domain` with the genesis fork version.
+        let domain = spec.compute_domain(
+            Domain::RandaoCommitmentRegistration,
+            spec.genesis_fork_version,
+            state.genesis_validators_root(),
+        );
+        let signing_root = SigningData {
+            object_root: registration.tree_hash_root(),
+            domain,
+        }
+        .tree_hash_root();
+        block_verify!(
+            signed_registration.signature.verify(&pubkey, signing_root),
+            invalid(RandaoCommitmentRegistrationInvalidReason::BadSignature)
+        );
+    }
+
+    Ok(())
+}
+
+/// Validates a `SignedRandaoCommitmentRegistration` and queues it for activation.
+///
+/// [New in Eip8321: EIP-8321]
+pub fn process_randao_commitment_registration<E: EthSpec>(
+    state: &mut BeaconState<E>,
+    signed_registration: &SignedRandaoCommitmentRegistration,
+    verify_signatures: VerifySignatures,
+    spec: &ChainSpec,
+) -> Result<(), BlockProcessingError> {
+    verify_randao_commitment_registration(state, signed_registration, verify_signatures, spec)?;
+
+    let registration = &signed_registration.message;
+    let activation_epoch = state
+        .current_epoch()
+        .safe_add(E::commitment_registration_delay())?;
+    state
+        .pending_randao_commitments_mut()?
+        .push(PendingRandaoCommitment {
+            validator_index: registration.validator_index,
+            commitment: registration.commitment,
+            activation_epoch,
+        })?;
+
     Ok(())
 }
 
@@ -94,7 +203,7 @@ pub fn process_operations<E: EthSpec, Payload: AbstractExecPayload<E>>(
 pub fn verify_operation_list_lengths<E: EthSpec, Payload: AbstractExecPayload<E>>(
     block_body: BeaconBlockBodyRef<E, Payload>,
 ) -> Result<(), BlockProcessingError> {
-    let checks: [(&str, usize, usize); 6] = [
+    let checks: [(&str, usize, usize); 7] = [
         (
             "proposer_slashings",
             block_body.proposer_slashings().len(),
@@ -130,6 +239,14 @@ pub fn verify_operation_list_lengths<E: EthSpec, Payload: AbstractExecPayload<E>
                 .map(|atts| atts.len())
                 .unwrap_or(0),
             E::MaxPayloadAttestations::to_usize(),
+        ),
+        (
+            "randao_commitment_registrations",
+            block_body
+                .randao_commitment_registrations()
+                .map(|registrations| registrations.len())
+                .unwrap_or(0),
+            E::MaxRandaoCommitmentRegistrations::to_usize(),
         ),
     ];
 
