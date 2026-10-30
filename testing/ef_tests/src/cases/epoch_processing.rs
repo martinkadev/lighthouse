@@ -90,6 +90,9 @@ pub struct ProposerLookahead;
 pub struct PtcWindow;
 #[derive(Debug)]
 pub struct BuilderPendingPayments;
+#[derive(Debug)]
+#[allow(dead_code)] // Constructed by the integration-test handler.
+pub struct PendingRandaoCommitments;
 
 type_name!(
     JustificationAndFinalization,
@@ -114,6 +117,7 @@ type_name!(ParticipationFlagUpdates, "participation_flag_updates");
 type_name!(ProposerLookahead, "proposer_lookahead");
 type_name!(PtcWindow, "ptc_window");
 type_name!(BuilderPendingPayments, "builder_pending_payments");
+type_name!(PendingRandaoCommitments, "pending_randao_commitments");
 
 impl<E: EthSpec> EpochTransition<E> for JustificationAndFinalization {
     fn run(state: &mut BeaconState<E>, spec: &ChainSpec) -> Result<(), EpochProcessingError> {
@@ -176,6 +180,12 @@ impl<E: EthSpec> EpochTransition<E> for Slashings {
             )?;
         }
         Ok(())
+    }
+}
+
+impl<E: EthSpec> EpochTransition<E> for PendingRandaoCommitments {
+    fn run(state: &mut BeaconState<E>, spec: &ChainSpec) -> Result<(), EpochProcessingError> {
+        state_processing::per_epoch_processing::process_pending_randao_commitments(state, spec)
     }
 }
 
@@ -433,7 +443,37 @@ impl<E: EthSpec, T: EpochTransition<E>> Case for EpochProcessing<E, T> {
             return false;
         }
 
+        // EIP-8321 vectors live under the `eip8321` feature directory, not per-fork dirs.
+        if T::name() == "pending_randao_commitments" {
+            return false;
+        }
+
         true
+    }
+
+    fn is_enabled_for_feature(feature_name: FeatureName) -> bool {
+        feature_name == FeatureName::Eip8321
+            && matches!(
+                T::name(),
+                "builder_pending_payments"
+                    | "effective_balance_updates"
+                    | "historical_summaries_update"
+                    | "inactivity_updates"
+                    | "justification_and_finalization"
+                    | "participation_flag_updates"
+                    | "pending_consolidations"
+                    | "pending_deposits"
+                    | "pending_deposits_churn"
+                    | "pending_randao_commitments"
+                    | "proposer_lookahead"
+                    | "ptc_window"
+                    | "randao_mixes_reset"
+                    | "registry_updates"
+                    | "rewards_and_penalties"
+                    | "slashings"
+                    | "slashings_reset"
+                    | "sync_committee_updates"
+            )
     }
 
     fn result(&self, _case_index: usize, fork_name: ForkName) -> Result<(), Error> {

@@ -23,8 +23,9 @@ use state_processing::{
             altair_deneb, base, gloas, process_attester_slashings,
             process_bls_to_execution_changes, process_deposits, process_exits,
             process_payload_attestation, process_proposer_slashings,
+            process_randao_commitment_registration,
         },
-        process_parent_execution_payload, process_sync_aggregate, withdrawals,
+        process_parent_execution_payload, process_randao, process_sync_aggregate, withdrawals,
     },
 };
 use std::fmt::Debug;
@@ -34,7 +35,8 @@ use types::{
     BeaconState, BlindedPayload, BuilderDepositRequest, BuilderExitRequest, ConsolidationRequest,
     Deposit, DepositRequest, ExecutionPayload, ForkVersionDecode, FullPayload, PayloadAttestation,
     ProposerSlashing, SignedBlsToExecutionChange, SignedExecutionPayloadBid,
-    SignedExecutionPayloadEnvelope, SignedVoluntaryExit, SyncAggregate, WithdrawalRequest,
+    SignedExecutionPayloadEnvelope, SignedRandaoCommitmentRegistration, SignedVoluntaryExit,
+    SyncAggregate, WithdrawalRequest,
 };
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -61,6 +63,20 @@ pub struct WithdrawalsPayload<E: EthSpec> {
 #[derive(Debug, Clone)]
 pub struct VoluntaryExitChurn {
     exit: SignedVoluntaryExit,
+}
+
+/// Newtype for testing hash-chain RANDAO reveals (EIP-8321).
+#[allow(dead_code)] // Constructed by the integration-test handler.
+#[derive(Debug, Clone)]
+pub struct RandaoBlock<E: EthSpec> {
+    block: BeaconBlock<E>,
+}
+
+/// Newtype for testing hash-chain RANDAO commitment registrations (EIP-8321).
+#[allow(dead_code)] // Constructed by the integration-test handler.
+#[derive(Debug, Clone)]
+pub struct RandaoCommitmentRegistrationOperation {
+    registration: SignedRandaoCommitmentRegistration,
 }
 
 /// Newtype for testing execution payload bids.
@@ -90,7 +106,7 @@ pub trait Operation<E: EthSpec>: Debug + Sync + Sized {
 
     fn handler_name() -> String;
 
-    fn filename() -> String {
+    fn file_name() -> String {
         format!("{}.ssz_snappy", Self::handler_name())
     }
 
@@ -292,7 +308,7 @@ impl<E: EthSpec> Operation<E> for VoluntaryExitChurn {
         "voluntary_exit_churn".into()
     }
 
-    fn filename() -> String {
+    fn file_name() -> String {
         "voluntary_exit.ssz_snappy".into()
     }
 
@@ -319,6 +335,78 @@ impl<E: EthSpec> Operation<E> for VoluntaryExitChurn {
     }
 }
 
+impl<E: EthSpec> Operation<E> for RandaoBlock<E> {
+    type Error = BlockProcessingError;
+
+    fn handler_name() -> String {
+        "randao".into()
+    }
+
+    fn is_enabled_for_fork(_fork_name: ForkName) -> bool {
+        // EIP-8321 vectors live under the `eip8321` feature directory, not per-fork dirs.
+        false
+    }
+
+    fn file_name() -> String {
+        "block.ssz_snappy".into()
+    }
+
+    fn decode(path: &Path, _fork_name: ForkName, spec: &ChainSpec) -> Result<Self, Error> {
+        Ok(Self {
+            block: ssz_decode_file_with(path, |bytes| BeaconBlock::from_ssz_bytes(bytes, spec))?,
+        })
+    }
+
+    fn apply_to(
+        &self,
+        state: &mut BeaconState<E>,
+        spec: &ChainSpec,
+        _: &Operations<E, Self>,
+    ) -> Result<(), BlockProcessingError> {
+        let mut ctxt = ConsensusContext::new(state.slot());
+        process_randao(
+            state,
+            self.block.to_ref(),
+            VerifySignatures::True,
+            &mut ctxt,
+            spec,
+        )
+    }
+}
+
+impl<E: EthSpec> Operation<E> for RandaoCommitmentRegistrationOperation {
+    type Error = BlockProcessingError;
+
+    fn handler_name() -> String {
+        "randao_commitment_registration".into()
+    }
+
+    fn is_enabled_for_fork(_fork_name: ForkName) -> bool {
+        // EIP-8321 vectors live under the `eip8321` feature directory, not per-fork dirs.
+        false
+    }
+
+    fn decode(path: &Path, _fork_name: ForkName, _spec: &ChainSpec) -> Result<Self, Error> {
+        Ok(Self {
+            registration: ssz_decode_file(path)?,
+        })
+    }
+
+    fn apply_to(
+        &self,
+        state: &mut BeaconState<E>,
+        spec: &ChainSpec,
+        _: &Operations<E, Self>,
+    ) -> Result<(), BlockProcessingError> {
+        process_randao_commitment_registration(
+            state,
+            &self.registration,
+            VerifySignatures::True,
+            spec,
+        )
+    }
+}
+
 impl<E: EthSpec> Operation<E> for BeaconBlock<E> {
     type Error = BlockProcessingError;
 
@@ -326,7 +414,7 @@ impl<E: EthSpec> Operation<E> for BeaconBlock<E> {
         "block_header".into()
     }
 
-    fn filename() -> String {
+    fn file_name() -> String {
         "block.ssz_snappy".into()
     }
 
@@ -359,7 +447,7 @@ impl<E: EthSpec> Operation<E> for SyncAggregate<E> {
         "sync_aggregate".into()
     }
 
-    fn filename() -> String {
+    fn file_name() -> String {
         "sync_aggregate.ssz_snappy".into()
     }
 
@@ -389,7 +477,7 @@ impl<E: EthSpec> Operation<E> for BeaconBlockBody<E, FullPayload<E>> {
         "execution_payload".into()
     }
 
-    fn filename() -> String {
+    fn file_name() -> String {
         "body.ssz_snappy".into()
     }
 
@@ -435,7 +523,7 @@ impl<E: EthSpec> Operation<E> for BeaconBlockBody<E, BlindedPayload<E>> {
         "execution_payload".into()
     }
 
-    fn filename() -> String {
+    fn file_name() -> String {
         "body.ssz_snappy".into()
     }
 
@@ -497,7 +585,7 @@ impl<E: EthSpec> Operation<E> for SignedExecutionPayloadEnvelope<E> {
         "execution_payload".into()
     }
 
-    fn filename() -> String {
+    fn file_name() -> String {
         "signed_envelope.ssz_snappy".into()
     }
 
@@ -543,7 +631,7 @@ impl<E: EthSpec> Operation<E> for ExecutionPayloadBidBlock<E> {
         "execution_payload_bid".into()
     }
 
-    fn filename() -> String {
+    fn file_name() -> String {
         "execution_payload_bid.ssz_snappy".into()
     }
 
@@ -581,7 +669,7 @@ impl<E: EthSpec> Operation<E> for ParentExecutionPayloadBlock<E> {
         "parent_execution_payload".into()
     }
 
-    fn filename() -> String {
+    fn file_name() -> String {
         "block.ssz_snappy".into()
     }
 
@@ -611,7 +699,7 @@ impl<E: EthSpec> Operation<E> for WithdrawalsPayload<E> {
         "withdrawals".into()
     }
 
-    fn filename() -> String {
+    fn file_name() -> String {
         "execution_payload.ssz_snappy".into()
     }
 
@@ -659,7 +747,7 @@ impl<E: EthSpec> Operation<E> for SignedBlsToExecutionChange {
         "bls_to_execution_change".into()
     }
 
-    fn filename() -> String {
+    fn file_name() -> String {
         "address_change.ssz_snappy".into()
     }
 
@@ -862,16 +950,16 @@ impl<E: EthSpec, O: Operation<E>> LoadCase for Operations<E, O> {
 
         // Check BLS setting here before SSZ deserialization, as most types require signatures
         // to be valid.
-        let operation_path = path.join(O::filename());
+        let operation_path = path.join(O::file_name());
         let operation = if metadata.bls_setting.unwrap_or_default().check().is_ok() {
             // Invalid operations may be rejected during decoding, before state processing.
             Some(O::decode(&operation_path, fork_name, spec))
         } else {
             None
         };
-        let post_filename = path.join("post.ssz_snappy");
-        let post = if post_filename.is_file() {
-            Some(ssz_decode_state(&post_filename, spec)?)
+        let post_file_name = path.join("post.ssz_snappy");
+        let post = if post_file_name.is_file() {
+            Some(ssz_decode_state(&post_file_name, spec)?)
         } else {
             None
         };
@@ -894,6 +982,32 @@ impl<E: EthSpec, O: Operation<E>> Case for Operations<E, O> {
 
     fn is_enabled_for_fork(fork_name: ForkName) -> bool {
         O::is_enabled_for_fork(fork_name)
+    }
+
+    fn is_enabled_for_feature(feature_name: FeatureName) -> bool {
+        feature_name == FeatureName::Eip8321
+            && matches!(
+                O::handler_name().as_str(),
+                "attestation"
+                    | "attester_slashing"
+                    | "block_header"
+                    | "bls_to_execution_change"
+                    | "builder_deposit_request"
+                    | "builder_exit_request"
+                    | "consolidation_request"
+                    | "deposit_request"
+                    | "execution_payload_bid"
+                    | "parent_execution_payload"
+                    | "payload_attestation"
+                    | "proposer_slashing"
+                    | "randao"
+                    | "randao_commitment_registration"
+                    | "sync_aggregate"
+                    | "voluntary_exit"
+                    | "voluntary_exit_churn"
+                    | "withdrawal_request"
+                    | "withdrawals"
+            )
     }
 
     fn result(&self, _case_index: usize, fork_name: ForkName) -> Result<(), Error> {

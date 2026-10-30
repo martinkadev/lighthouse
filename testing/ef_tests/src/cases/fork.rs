@@ -5,7 +5,7 @@ use serde::Deserialize;
 use state_processing::GloasVerificationContext;
 use state_processing::upgrade::{
     upgrade_to_altair, upgrade_to_bellatrix, upgrade_to_capella, upgrade_to_deneb,
-    upgrade_to_electra, upgrade_to_fulu, upgrade_to_gloas, upgrade_to_heze,
+    upgrade_to_eip8321, upgrade_to_electra, upgrade_to_fulu, upgrade_to_gloas, upgrade_to_heze,
 };
 use types::BeaconState;
 
@@ -32,11 +32,8 @@ impl<E: EthSpec> LoadCase for ForkTest<E> {
         let metadata: Metadata = yaml_decode_file(&path.join("meta.yaml"))?;
         assert_eq!(metadata.fork_name(), fork_name);
 
-        // Decode pre-state with previous fork.
-        let pre_spec = &fork_name
-            .previous_fork()
-            .unwrap_or(ForkName::Base)
-            .make_genesis_spec(E::default_spec());
+        let pre_fork = fork_name.previous_fork().unwrap_or(ForkName::Base);
+        let pre_spec = &pre_fork.make_genesis_spec(E::default_spec());
         let pre = ssz_decode_state(&path.join("pre.ssz_snappy"), pre_spec)?;
 
         // Decode post-state with target fork.
@@ -56,6 +53,10 @@ impl<E: EthSpec> Case for ForkTest<E> {
         // Upgrades exist targeting all forks except phase0/base.
         // Fork tests also need BLS.
         cfg!(not(feature = "fake_crypto")) && fork_name != ForkName::Base
+    }
+
+    fn is_enabled_for_feature(feature_name: FeatureName) -> bool {
+        cfg!(not(feature = "fake_crypto")) && feature_name == FeatureName::Eip8321
     }
 
     fn result(&self, _case_index: usize, fork_name: ForkName) -> Result<(), Error> {
@@ -80,6 +81,7 @@ impl<E: EthSpec> Case for ForkTest<E> {
             )
             .map(|_| result_state),
             ForkName::Heze => upgrade_to_heze(&mut result_state, spec).map(|_| result_state),
+            ForkName::Eip8321 => upgrade_to_eip8321(&mut result_state, spec).map(|_| result_state),
         };
 
         compare_beacon_state_results_without_caches(&mut result, &mut expected)
