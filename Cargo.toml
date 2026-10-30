@@ -120,6 +120,7 @@ beacon_node_fallback = { path = "validator_client/beacon_node_fallback" }
 beacon_processor = { path = "beacon_node/beacon_processor" }
 bincode = "1"
 bitvec = "1"
+blake3 = "1.8.7"
 bls = { path = "crypto/bls" }
 builder_client = { path = "beacon_node/builder_client" }
 builder_store = { path = "validator_client/builder_store" }

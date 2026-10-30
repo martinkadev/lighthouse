@@ -1635,6 +1635,15 @@ impl<T: BeaconChainTypes> NetworkService<T> {
                         ),
                 )
             }
+            PubsubMessage::RandaoCommitmentRegistration(registration) => self
+                .handle_beacon_processor_send_result(
+                    self.network_beacon_processor
+                        .send_gossip_randao_commitment_registration(
+                            message_id,
+                            peer_id,
+                            registration,
+                        ),
+                ),
             PubsubMessage::InclusionList(inclusion_list) => {
                 trace!(%peer_id, "Received a signed inclusion list");
                 self.handle_beacon_processor_send_result(

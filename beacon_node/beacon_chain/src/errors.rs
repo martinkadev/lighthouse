@@ -356,6 +356,8 @@ pub enum BlockProductionError {
     GloasNotImplemented(String),
     // TODO(heze): Remove this once Heze is implemented
     HezeNotImplemented(String),
+    MissingHashChainReveal,
+    InvalidHashChainReveal,
 }
 
 easy_from_to!(BlockProcessingError, BlockProductionError);

@@ -31,5 +31,6 @@ validator_metrics = { workspace = true }
 validator_store = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "signal", "macros", "test-util"] }
 validator_test_rig = { workspace = true }

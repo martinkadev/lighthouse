@@ -7,6 +7,7 @@ authors = ["Sigma Prime <contact@sigmaprime.io>"]
 [dependencies]
 account_utils = { workspace = true }
 beacon_node_fallback = { workspace = true }
+blake3 = { workspace = true }
 bls = { workspace = true }
 builder_types = { workspace = true }
 doppelganger_service = { workspace = true }
@@ -17,16 +18,20 @@ futures = { workspace = true }
 initialized_validators = { workspace = true }
 logging = { workspace = true }
 parking_lot = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 signing_method = { workspace = true }
 slashing_protection = { workspace = true }
 slot_clock = { workspace = true }
 task_executor = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 types = { workspace = true }
 validator_metrics = { workspace = true }
 validator_store = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 futures = { workspace = true }

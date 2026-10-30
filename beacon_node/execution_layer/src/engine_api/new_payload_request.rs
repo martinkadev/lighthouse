@@ -212,7 +212,9 @@ impl<'a, E: EthSpec> TryFrom<BeaconBlockRef<'a, E>> for NewPayloadRequest<'a, E>
                 execution_requests: &block_ref.body.execution_requests,
             })),
             BeaconBlockRef::Gloas(_) => Err(Self::Error::IncorrectStateVariant),
-            BeaconBlockRef::Heze(_) => Err(Self::Error::IncorrectStateVariant),
+            BeaconBlockRef::Heze(_) | BeaconBlockRef::Eip8321(_) => {
+                Err(Self::Error::IncorrectStateVariant)
+            }
         }
     }
 }

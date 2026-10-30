@@ -495,24 +495,28 @@ async fn side_chain_inclusion_list_uses_side_chain_committee() {
 
     // The side chain skips a slot, so its RANDAO mixes and committees differ. Only the
     // canonical chain is attested to, so it stays the head without finalizing past the fork.
-    let side_slots = ((fork_slot + 2).as_u64()..=slot.as_u64())
-        .map(Slot::new)
-        .collect();
-    let canonical_slots = ((fork_slot + 1).as_u64()..=slot.as_u64())
-        .map(Slot::new)
-        .collect();
-    let results = harness
-        .add_blocks_on_multiple_chains(vec![
-            (fork_state.clone(), side_slots, vec![]),
-            (
-                fork_state,
-                canonical_slots,
-                (0..NUM_VALIDATORS / 2).collect(),
-            ),
-        ])
-        .await;
-    let side_head_root: Hash256 = results[0].2.into();
-    let canonical_head_root: Hash256 = results[1].2.into();
+    // Import competing blocks in slot order. The generic multi-chain helper processes an
+    // epoch per branch, which would rewind the clock after fork choice has advanced.
+    let mut side_state = fork_state.clone();
+    let mut canonical_state = fork_state;
+    let mut side_head_root = harness.head_block_root();
+    let mut canonical_head_root = side_head_root;
+    let validators = (0..NUM_VALIDATORS / 2).collect::<Vec<_>>();
+    for number in (fork_slot + 1).as_u64()..=slot.as_u64() {
+        let current_slot = Slot::new(number);
+        let (_, _, root, state) = harness
+            .add_attested_blocks_at_slots(canonical_state, &[current_slot], &validators)
+            .await;
+        canonical_state = state;
+        canonical_head_root = root.into();
+        if current_slot > fork_slot + 1 {
+            let (_, _, root, state) = harness
+                .add_attested_blocks_at_slots(side_state, &[current_slot], &[])
+                .await;
+            side_state = state;
+            side_head_root = root.into();
+        }
+    }
     assert_eq!(harness.head_block_root(), canonical_head_root);
     harness.chain.slot_clock.set_slot(slot.as_u64());
 
@@ -672,4 +676,19 @@ fn inclusion_list_without_blob_transactions_is_accepted() {
         verify_no_blob_transactions(&transactions(vec![vec![0xaa; 10]; 3])),
         Ok(())
     );
+}
+
+#[test]
+fn valid_inclusion_list_at_genesis() {
+    if !fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
+        return;
+    }
+    let ctx = TestContext::new();
+    ctx.harness
+        .chain
+        .slot_clock
+        .set_current_time(Duration::ZERO);
+    let signed = ctx.valid_inclusion_list(Slot::new(0), ctx.genesis_block_root, vec![vec![1]]);
+    GossipVerifiedInclusionList::new::<T>(signed, Duration::ZERO, &ctx.gossip_ctx())
+        .expect("the past clock-disparity window may extend before genesis");
 }

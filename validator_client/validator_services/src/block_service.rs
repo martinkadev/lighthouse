@@ -606,6 +606,67 @@ impl<S: ValidatorStore + 'static, T: SlotClock + 'static> BlockService<S, T> {
         Ok(Some(block_root))
     }
 
+    fn check_randao_response(
+        response: &ProduceBlockV4Response<S::E>,
+        bls_reveal: &bls::SignatureBytes,
+        hash_chain_reveal: Option<Hash256>,
+    ) -> Result<(), BlockError> {
+        let body = response.block().body();
+        let expected = bls_reveal
+            .decompress()
+            .map_err(|_| BlockError::Recoverable("Invalid local RANDAO signature".into()))?;
+        if body.randao_reveal() != &expected
+            || body.hash_chain_reveal().copied().unwrap_or(Hash256::ZERO)
+                != hash_chain_reveal.unwrap_or(Hash256::ZERO)
+        {
+            return Err(BlockError::Recoverable(
+                "Produced block changed the requested RANDAO reveal".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn randao_for_proposal_node(
+        &self,
+        node: &BeaconNodeHttpClient,
+        slot: Slot,
+        pubkey: PublicKeyBytes,
+        legacy_reveal: bls::SignatureBytes,
+    ) -> Result<(bls::SignatureBytes, Option<Hash256>), BlockError> {
+        if !self.validator_store.hash_chain_randao_enabled()
+            || !self
+                .chain_spec
+                .fork_name_at_slot::<S::E>(slot)
+                .eip8321_enabled()
+        {
+            return Ok((legacy_reveal, None));
+        }
+        // Query each candidate BN separately. A fallback node may select a different parent.
+        let context = node
+            .get_randao_proposal_context(slot)
+            .await
+            .map_err(|e| BlockError::Recoverable(format!("RANDAO proposal context: {e:?}")))?;
+        let prepared = self
+            .validator_store
+            .prepare_randao_proposal(pubkey, slot.epoch(S::E::slots_per_epoch()), context)
+            .await
+            .map_err(|e| BlockError::Recoverable(format!("Prepare hash-chain RANDAO: {e:?}")))?;
+        if let Some(registration) = prepared.registration {
+            // Registration submission does not activate the commitment. The returned reveal
+            // remains BLS until the selected proposal state contains an active commitment.
+            if let Err(error) = node
+                .post_randao_commitment_registration(&registration)
+                .await
+            {
+                warn!(
+                    ?error,
+                    "RANDAO registration submission failed; continuing with legacy reveal"
+                );
+            }
+        }
+        Ok((prepared.bls_reveal.into(), prepared.hash_chain_reveal))
+    }
+
     #[instrument(
         name = "lh_block_proposal_duty_cycle",
         skip_all,
@@ -622,28 +683,41 @@ impl<S: ValidatorStore + 'static, T: SlotClock + 'static> BlockService<S, T> {
             &[validator_metrics::BEACON_BLOCK],
         );
 
-        let randao_reveal = match self
-            .validator_store
-            .randao_reveal(validator_pubkey, slot.epoch(S::E::slots_per_epoch()))
-            .await
+        let randao_reveal: bls::SignatureBytes = if self.validator_store.hash_chain_randao_enabled()
+            && self
+                .chain_spec
+                .fork_name_at_slot::<S::E>(slot)
+                .eip8321_enabled()
         {
-            Ok(signature) => signature.into(),
-            Err(ValidatorStoreError::UnknownPubkey(pubkey)) => {
-                // A pubkey can be missing when a validator was recently removed
-                // via the API.
-                warn!(
-                    info = "a validator may have recently been removed from this VC",
-                    ?pubkey,
-                    ?slot,
-                    "Missing pubkey for block randao"
-                );
-                return Ok(());
-            }
-            Err(e) => {
-                return Err(BlockError::Recoverable(format!(
-                    "Unable to produce randao reveal signature: {:?}",
-                    e
-                )));
+            // The node-specific proposal context chooses BLS or the chain path below.
+            // Registered validators must not depend on an unnecessary BLS RANDAO signature.
+            bls::Signature::infinity()
+                .map_err(|_| BlockError::Recoverable("Unable to encode infinity signature".into()))?
+                .into()
+        } else {
+            match self
+                .validator_store
+                .randao_reveal(validator_pubkey, slot.epoch(S::E::slots_per_epoch()))
+                .await
+            {
+                Ok(signature) => signature.into(),
+                Err(ValidatorStoreError::UnknownPubkey(pubkey)) => {
+                    // A pubkey can be missing when a validator was recently removed
+                    // via the API.
+                    warn!(
+                        info = "a validator may have recently been removed from this VC",
+                        ?pubkey,
+                        ?slot,
+                        "Missing pubkey for block randao"
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    return Err(BlockError::Recoverable(format!(
+                        "Unable to produce randao reveal signature: {:?}",
+                        e
+                    )));
+                }
             }
         };
 
@@ -710,17 +784,33 @@ impl<S: ValidatorStore + 'static, T: SlotClock + 'static> BlockService<S, T> {
                         &validator_metrics::BLOCK_SERVICE_TIMES,
                         &[validator_metrics::BEACON_BLOCK_HTTP_GET],
                     );
-                    beacon_node
-                        .post_validator_blocks_v4_ssz::<S::E>(
+                    let (node_randao, hash_chain_reveal) = self_ref
+                        .randao_for_proposal_node(
+                            &beacon_node,
                             slot,
-                            randao_reveal_ref,
+                            validator_pubkey,
+                            randao_reveal_ref.clone(),
+                        )
+                        .await?;
+                    let response = beacon_node
+                        .post_validator_blocks_v4_ssz_with_hash_chain::<S::E>(
+                            slot,
+                            &node_randao,
                             graffiti.as_ref(),
                             include_payload,
                             builder_config_ref,
                             self_ref.graffiti_policy,
                             fork_name,
+                            hash_chain_reveal,
                         )
                         .await
+                        .map_err(|e| BlockError::Recoverable(format!("Block production: {e:?}")))?;
+                    if self_ref.validator_store.hash_chain_randao_enabled()
+                        && fork_name.eip8321_enabled()
+                    {
+                        Self::check_randao_response(&response.0, &node_randao, hash_chain_reveal)?;
+                    }
+                    Ok::<_, BlockError>(response)
                 })
                 .await;
 
@@ -741,15 +831,24 @@ impl<S: ValidatorStore + 'static, T: SlotClock + 'static> BlockService<S, T> {
                                 &validator_metrics::BLOCK_SERVICE_TIMES,
                                 &[validator_metrics::BEACON_BLOCK_HTTP_GET],
                             );
-                            let (json_block_response, metadata) = beacon_node
-                                .post_validator_blocks_v4::<S::E>(
+                            let (node_randao, hash_chain_reveal) = self_ref
+                                .randao_for_proposal_node(
+                                    &beacon_node,
                                     slot,
-                                    randao_reveal_ref,
+                                    validator_pubkey,
+                                    randao_reveal_ref.clone(),
+                                )
+                                .await?;
+                            let (json_block_response, metadata) = beacon_node
+                                .post_validator_blocks_v4_with_hash_chain::<S::E>(
+                                    slot,
+                                    &node_randao,
                                     graffiti.as_ref(),
                                     include_payload,
                                     builder_config_ref,
                                     self_ref.graffiti_policy,
                                     fork_name,
+                                    hash_chain_reveal,
                                 )
                                 .await
                                 .map_err(|e| {
@@ -759,6 +858,15 @@ impl<S: ValidatorStore + 'static, T: SlotClock + 'static> BlockService<S, T> {
                                     ))
                                 })?;
 
+                            if self_ref.validator_store.hash_chain_randao_enabled()
+                                && fork_name.eip8321_enabled()
+                            {
+                                Self::check_randao_response(
+                                    &json_block_response,
+                                    &node_randao,
+                                    hash_chain_reveal,
+                                )?;
+                            }
                             Ok((json_block_response, metadata.builder_url))
                         })
                         .await
@@ -1202,6 +1310,129 @@ mod tests {
     use validator_test_rig::mock_beacon_node::MockBeaconNode;
     use validator_test_rig::recording_validator_store::RecordingValidatorStore;
     use validator_test_rig::validator_client_harness::{S, ValidatorClientHarness};
+
+    #[tokio::test]
+    async fn randao_service_proposes_with_hash_chain_and_uses_each_nodes_context() {
+        let custody = tempfile::tempdir().unwrap();
+        let config = validator_test_rig::validator_client_harness::ValidatorStoreConfig {
+            randao_hash_chain_dir: Some(custody.path().into()),
+            ..Default::default()
+        };
+        let spec = ForkName::Eip8321.make_genesis_spec(MainnetEthSpec::default_spec());
+        let mut harness = ValidatorClientHarness::new_with_spec_and_config(1, spec, &config).await;
+        let pubkey = harness.pubkeys[0];
+        let slot = Slot::new(1);
+        harness.slot_clock.set_slot(1);
+        let context = eth2::types::RandaoProposalContext {
+            parent_root: Hash256::ZERO,
+            validator_index: 0,
+            pubkey,
+            genesis_validators_root: Hash256::ZERO,
+            commitment: Hash256::ZERO,
+            pending_commitment: None,
+        };
+        let initial = harness
+            .validator_store
+            .prepare_randao_proposal(pubkey, types::Epoch::new(0), context.clone())
+            .await
+            .unwrap();
+        let mut active = context.clone();
+        active.commitment = initial.registration.unwrap().message.commitment;
+        let reveal = harness
+            .validator_store
+            .prepare_randao_proposal(pubkey, types::Epoch::new(0), active.clone())
+            .await
+            .unwrap()
+            .hash_chain_reveal
+            .unwrap();
+        let active_mock = harness
+            .mock_beacon_node_1
+            .mock_randao_context(slot, &active);
+        let legacy_mock = harness
+            .mock_beacon_node_2
+            .mock_randao_context(slot, &context);
+        let registration_mock = harness.mock_beacon_node_2.mock_randao_registration();
+        let service = BlockServiceBuilder::new()
+            .validator_store(harness.validator_store.clone())
+            .slot_clock(harness.slot_clock.clone())
+            .beacon_nodes(harness.beacon_nodes.clone())
+            .executor(harness.test_runtime.task_executor.clone())
+            .chain_spec(harness.spec.clone())
+            .request_auth_cache(RequestAuthCache::default())
+            .configured_builders(
+                BuilderStore::open_or_create(harness._validator_dir.path()).unwrap(),
+            )
+            .build()
+            .unwrap();
+        let legacy = bls::Signature::empty().into();
+        let (signature, selected) = service
+            .randao_for_proposal_node(
+                &harness.mock_beacon_node_1.beacon_api_client,
+                slot,
+                pubkey,
+                legacy,
+            )
+            .await
+            .unwrap();
+        assert!(signature.decompress().unwrap().is_infinity());
+        assert_eq!(selected, Some(reveal));
+        let (signature, selected) = service
+            .randao_for_proposal_node(
+                &harness.mock_beacon_node_2.beacon_api_client,
+                slot,
+                pubkey,
+                bls::Signature::empty().into(),
+            )
+            .await
+            .unwrap();
+        assert!(!signature.decompress().unwrap().is_infinity());
+        assert!(selected.is_none());
+        legacy_mock.expect(1).assert();
+        registration_mock.expect(1).assert();
+        let mut block = BeaconBlock::empty(&harness.spec);
+        *block.slot_mut() = slot;
+        *block.body_mut().hash_chain_reveal_mut().unwrap() = reveal;
+        *block.body_mut().randao_reveal_mut() = bls::Signature::infinity().unwrap();
+        let production = harness
+            .mock_beacon_node_1
+            .mock_post_validator_blocks_v4_ssz(&block_only(&block), false, ForkName::Eip8321, slot);
+        let published = harness
+            .mock_beacon_node_1
+            .mock_post_beacon_blocks_v2_ssz(ForkName::Eip8321);
+        service
+            .clone()
+            .get_validator_block_and_publish_block(slot, pubkey, None)
+            .await
+            .unwrap();
+        production.expect(1).assert();
+        published.expect(1).assert();
+        active_mock.expect(2).assert();
+        let received = harness
+            .mock_beacon_node_1
+            .received_full_blocks
+            .lock()
+            .unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(
+            *received[0]
+                .signed_block()
+                .message()
+                .body()
+                .hash_chain_reveal()
+                .unwrap(),
+            reveal
+        );
+        let mut wrong = block.clone();
+        *wrong.body_mut().hash_chain_reveal_mut().unwrap() = Hash256::ZERO;
+        assert!(
+            BlockService::<S, ManualSlotClock>::check_randao_response(
+                &block_only(&wrong),
+                &bls::Signature::infinity().unwrap().into(),
+                Some(reveal)
+            )
+            .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn request_auth_sign_deadline_drops_stalled_signer() {

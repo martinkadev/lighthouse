@@ -104,12 +104,13 @@ pub async fn produce_block_v4<T: BeaconChainTypes>(
         payload_contents,
         builder_url,
     ) = chain
-        .produce_block_with_verification_gloas(
+        .produce_block_with_verification_gloas_with_hash_chain(
             randao_reveal,
             slot,
             graffiti_settings,
             randao_verification,
             builder_config,
+            query.hash_chain_reveal,
         )
         .await
         .map_err(|e| {

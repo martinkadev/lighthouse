@@ -135,7 +135,9 @@ impl<E: EthSpec> ForkVersionDecode for ExecutionPayloadBid<E> {
                 "unsupported fork for ExecutionPayloadBid: {fork_name}"
             ))),
             ForkName::Gloas => ExecutionPayloadBidGloas::from_ssz_bytes(bytes).map(Self::Gloas),
-            ForkName::Heze => ExecutionPayloadBidHeze::from_ssz_bytes(bytes).map(Self::Heze),
+            ForkName::Heze | ForkName::Eip8321 => {
+                ExecutionPayloadBidHeze::from_ssz_bytes(bytes).map(Self::Heze)
+            }
         }
     }
 }
@@ -167,7 +169,7 @@ impl<'de, E: EthSpec> ContextDeserialize<'de, ForkName> for ExecutionPayloadBid<
             ForkName::Gloas => {
                 Self::Gloas(Deserialize::deserialize(deserializer).map_err(convert_err)?)
             }
-            ForkName::Heze => {
+            ForkName::Heze | ForkName::Eip8321 => {
                 Self::Heze(Deserialize::deserialize(deserializer).map_err(convert_err)?)
             }
         })
@@ -183,8 +185,11 @@ impl<'a, E: EthSpec> ExecutionPayloadBidRef<'a, E> {
         let fork_at_slot = spec.fork_name_at_slot::<E>(self.slot());
         let object_fork = self.fork_name_unchecked();
 
-        if fork_at_slot == object_fork {
-            Ok(object_fork)
+        // EIP-8321 retains the Heze bid container and signing fields.
+        if fork_at_slot == object_fork
+            || (fork_at_slot == ForkName::Eip8321 && object_fork == ForkName::Heze)
+        {
+            Ok(fork_at_slot)
         } else {
             Err(InconsistentFork {
                 fork_at_slot,
@@ -290,5 +295,43 @@ mod heze_tests {
             ExecutionPayloadBidRef::Heze(&bid_with_bits).signing_root(domain),
             "inclusion_list_bits must be covered by the Heze bid signing root",
         );
+    }
+}
+
+#[cfg(test)]
+mod eip8321_tests {
+    use super::*;
+    use crate::{Epoch, MinimalEthSpec};
+
+    #[test]
+    fn bid_format_across_heze_and_eip8321_boundaries() {
+        type E = MinimalEthSpec;
+        let mut spec = ForkName::Gloas.make_genesis_spec(E::default_spec());
+        spec.heze_fork_epoch = Some(Epoch::new(1));
+        spec.eip8321_fork_epoch = Some(Epoch::new(2));
+        for (epoch, fork) in [
+            (0, ForkName::Gloas),
+            (1, ForkName::Heze),
+            (2, ForkName::Eip8321),
+        ] {
+            let slot = Epoch::new(epoch).start_slot(E::slots_per_epoch());
+            let gloas = ExecutionPayloadBidGloas::<E> {
+                slot,
+                ..Default::default()
+            };
+            let heze = ExecutionPayloadBidHeze::<E> {
+                slot,
+                ..Default::default()
+            };
+            let gloas_result = ExecutionPayloadBidRef::Gloas(&gloas).fork_name(&spec);
+            let heze_result = ExecutionPayloadBidRef::Heze(&heze).fork_name(&spec);
+            if fork == ForkName::Gloas {
+                assert_eq!(gloas_result.unwrap(), fork);
+                assert!(heze_result.is_err());
+            } else {
+                assert!(gloas_result.is_err());
+                assert_eq!(heze_result.unwrap(), fork);
+            }
+        }
     }
 }

@@ -554,7 +554,7 @@ mod tests {
         let harness = TestHarness::new_with_validators(1).await;
         let service = &harness.service;
         let production_due = service.inclusion_list_production_due(Slot::new(0));
-        assert_eq!(production_due, Duration::from_secs(7));
+        assert_eq!(production_due, Duration::from_secs(8));
 
         // Past the current slot's production time, so the next slot is targeted
         advance_time(&service.slot_clock, production_due).await;
@@ -564,9 +564,9 @@ mod tests {
         // Start the wait, which registers the sleep timer with tokio
         assert!(service_wait.as_mut().now_or_never().is_none());
 
-        // 7s into the next slot: 1s before the inclusion list deadline
+        // 8s into the next slot: 1s before the inclusion list deadline
         let duration_to_wait = service.slot_clock.duration_to_next_slot().unwrap() + production_due;
-        // Advance both slot_clock and tokio::time to 19s
+        // Advance both slot_clock and tokio::time to 20s
         advance_time(&harness.service.slot_clock, duration_to_wait).await;
         assert!(
             service_wait.as_mut().now_or_never().is_none(),

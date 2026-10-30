@@ -66,6 +66,11 @@ pub enum BlockProcessingError {
     SyncAggregateInvalid {
         reason: SyncAggregateInvalid,
     },
+    /// [New in Heze:EIP-8321] Invalid hash-chain RANDAO commitment registration.
+    RandaoCommitmentRegistrationInvalid {
+        index: usize,
+        reason: RandaoCommitmentRegistrationInvalidReason,
+    },
     BeaconStateError(BeaconStateError),
     SignatureSetError(SignatureSetError),
     SszTypesError(ssz_types::Error),
@@ -561,6 +566,20 @@ pub enum ExecutionPayloadBidInvalid {
     PrevRandaoMismatch { expected: Hash256, bid: Hash256 },
     /// The bid contains more than the maximum number of kzg blob commitments.
     ExcessBlobCommitments { max: usize, bid: usize },
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum RandaoCommitmentRegistrationInvalidReason {
+    /// The registration references a validator index outside the registry.
+    ValidatorUnknown,
+    /// The commitment is the `UNSET_RANDAO_COMMITMENT` sentinel.
+    CommitmentUnset,
+    /// The validator has already registered a commitment.
+    CommitmentAlreadySet,
+    /// A registration for this validator is already pending.
+    CommitmentAlreadyPending,
+    /// The registration signature is invalid.
+    BadSignature,
 }
 
 #[derive(Debug, PartialEq, Clone)]

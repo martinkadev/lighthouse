@@ -209,6 +209,12 @@ pub struct ValidatorClient {
     )]
     pub stateless_block_production: bool,
 
+    #[clap(
+        long,
+        help = "Opt in to irreversible experimental EIP-8321 hash-chain registration. Store independent chain secrets in this directory. Back it up like validator keys; loss or exhaustion permanently prevents proposals for that index."
+    )]
+    pub randao_hash_chain_dir: Option<std::path::PathBuf>,
+
     /* REST API related arguments */
     #[clap(
         long,
