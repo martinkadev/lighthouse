@@ -262,6 +262,8 @@ impl Config {
             config.beacon_nodes_tls_certs = Some(tls_certs.iter().map(PathBuf::from).collect());
         }
 
+        config.validator_store.randao_hash_chain_dir =
+            validator_client_config.randao_hash_chain_dir.clone();
         config.distributed = validator_client_config.distributed;
         config.stateless_block_production = validator_client_config.stateless_block_production;
 

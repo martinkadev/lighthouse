@@ -15,6 +15,7 @@ pub enum MessageType {
     BlockV2,
     Deposit,
     RandaoReveal,
+    RandaoCommitmentRegistration,
     VoluntaryExit,
     SyncCommitteeMessage,
     SyncCommitteeSelectionProof,
@@ -40,6 +41,7 @@ pub enum ForkName {
     Fulu,
     Gloas,
     Heze,
+    Eip8321,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -96,6 +98,7 @@ pub enum Web3SignerObject<'a, E: EthSpec, Payload: AbstractExecPayload<E>> {
         #[serde(with = "serde_utils::bytes_4_hex")]
         genesis_fork_version: [u8; 4],
     },
+    RandaoCommitmentRegistration(&'a RandaoCommitmentRegistration),
     RandaoReveal {
         epoch: Epoch,
     },
@@ -162,6 +165,11 @@ impl<'a, E: EthSpec, Payload: AbstractExecPayload<E>> Web3SignerObject<'a, E, Pa
                 block: None,
                 block_header: Some(block.block_header()),
             }),
+            BeaconBlock::Eip8321(_) => Ok(Web3SignerObject::BeaconBlock {
+                version: ForkName::Eip8321,
+                block: None,
+                block_header: Some(block.block_header()),
+            }),
         }
     }
 
@@ -205,6 +213,9 @@ impl<'a, E: EthSpec, Payload: AbstractExecPayload<E>> Web3SignerObject<'a, E, Pa
             Web3SignerObject::ExecutionPayloadEnvelope(_) => MessageType::ExecutionPayloadEnvelope,
             Web3SignerObject::PayloadAttestationMessage(_) => {
                 MessageType::PayloadAttestationMessage
+            }
+            Web3SignerObject::RandaoCommitmentRegistration(_) => {
+                MessageType::RandaoCommitmentRegistration
             }
             Web3SignerObject::ProposerPreferences(_) => MessageType::ProposerPreferences,
             Web3SignerObject::BuilderRequestAuth(_) => MessageType::BuilderRequestAuth,
@@ -350,5 +361,37 @@ mod tests {
         assert!(value["builder_request_auth"]["data"].get("data").is_some());
         assert_eq!(value["builder_request_auth"]["data"]["slot"], "32");
         assert!(value.get("request_auth").is_none());
+    }
+    #[test]
+    fn randao_commitment_registration_request_shape() {
+        let registration = RandaoCommitmentRegistration {
+            validator_index: 7,
+            commitment: Hash256::repeat_byte(1),
+        };
+        let object=Web3SignerObject::<MainnetEthSpec,FullPayload<MainnetEthSpec>>::RandaoCommitmentRegistration(&registration);
+        assert_eq!(
+            object.message_type(),
+            MessageType::RandaoCommitmentRegistration
+        );
+        let request = SigningRequest {
+            message_type: MessageType::RandaoCommitmentRegistration,
+            fork_info: Some(ForkInfo {
+                fork: Fork {
+                    previous_version: [0; 4],
+                    current_version: [0; 4],
+                    epoch: Epoch::new(0),
+                },
+                genesis_validators_root: Hash256::repeat_byte(2),
+            }),
+            signing_root: Hash256::repeat_byte(3),
+            object,
+        };
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["type"], "RANDAO_COMMITMENT_REGISTRATION");
+        assert_eq!(
+            value["randao_commitment_registration"]["validator_index"],
+            "7"
+        );
+        assert_eq!(value["fork_info"]["fork"]["current_version"], "0x00000000");
     }
 }

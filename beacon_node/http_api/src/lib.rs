@@ -3268,6 +3268,49 @@ pub async fn serve<T: BeaconChainTypes>(
             },
         );
 
+    // The context contains public state only. Reveals travel on the V4 production request.
+    let get_lighthouse_randao = warp::path("lighthouse")
+        .and(warp::path("randao"))
+        .and(warp::path::param::<types::Slot>())
+        .and(warp::path::end())
+        .and(task_spawner_filter.clone())
+        .and(chain_filter.clone())
+        .then(
+            |slot: types::Slot,
+             task_spawner: TaskSpawner<T::EthSpec>,
+             chain: Arc<BeaconChain<T>>| {
+                task_spawner.blocking_json_task(Priority::P0, move || {
+                    let (
+                        parent_root,
+                        validator_index,
+                        pubkey,
+                        genesis_validators_root,
+                        commitment,
+                        pending_commitment,
+                    ) = chain.randao_proposal_context(slot).map_err(|e| {
+                        warp_utils::reject::custom_bad_request(format!(
+                            "RANDAO proposal context: {e:?}"
+                        ))
+                    })?;
+                    Ok(api_types::RandaoProposalContext {
+                        parent_root,
+                        validator_index,
+                        pubkey,
+                        genesis_validators_root,
+                        commitment,
+                        pending_commitment,
+                    })
+                })
+            },
+        );
+
+    let post_randao_registration = validator::post_randao_commitment_registration(
+        eth_v1.clone(),
+        task_spawner_filter.clone(),
+        chain_filter.clone(),
+        network_tx_filter.clone(),
+    );
+
     // GET lighthouse/staking
     let get_lighthouse_staking = warp::path("lighthouse")
         .and(warp::path("staking"))
@@ -3634,6 +3677,7 @@ pub async fn serve<T: BeaconChainTypes>(
                 .uor(get_lighthouse_validator_inclusion_global)
                 .uor(get_lighthouse_validator_inclusion)
                 .uor(get_lighthouse_staking)
+                .uor(get_lighthouse_randao)
                 .uor(get_lighthouse_database_info)
                 .uor(get_lighthouse_database_invariants)
                 .uor(get_lighthouse_custody_info)
@@ -3676,6 +3720,7 @@ pub async fn serve<T: BeaconChainTypes>(
                     .uor(post_beacon_pool_bls_to_execution_changes)
                     .uor(post_validator_proposer_preferences)
                     .uor(post_validator_inclusion_list)
+                    .uor(post_randao_registration)
                     .uor(post_beacon_execution_payload_envelopes)
                     .uor(post_beacon_execution_payload_bids)
                     .uor(post_beacon_state_validators)

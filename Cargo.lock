@@ -1469,6 +1469,7 @@ dependencies = [
  "arbitrary",
  "beacon_chain",
  "bitvec",
+ "blake3",
  "bls",
  "builder_client",
  "criterion",
@@ -4868,6 +4869,7 @@ dependencies = [
 name = "http_api"
 version = "0.1.0"
 dependencies = [
+ "account_utils",
  "axum 0.8.9",
  "axum_utils",
  "beacon_chain",
@@ -4890,7 +4892,9 @@ dependencies = [
  "hashlink 0.11.1",
  "health_metrics",
  "hex",
+ "initialized_validators",
  "lighthouse_network",
+ "lighthouse_validator_store",
  "lighthouse_version",
  "logging",
  "metrics",
@@ -4905,6 +4909,7 @@ dependencies = [
  "sensitive_url",
  "serde",
  "serde_json",
+ "slashing_protection",
  "slot_clock",
  "ssz_types",
  "state_processing",
@@ -4912,12 +4917,15 @@ dependencies = [
  "sysinfo",
  "system_health",
  "task_executor",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
  "tracing",
  "tree_hash",
  "types",
+ "validator_store",
+ "validator_test_rig",
  "warp",
  "warp_utils",
 ]
@@ -6292,6 +6300,7 @@ version = "0.1.0"
 dependencies = [
  "account_utils",
  "beacon_node_fallback",
+ "blake3",
  "bls",
  "builder_types",
  "doppelganger_service",
@@ -6302,7 +6311,9 @@ dependencies = [
  "initialized_validators",
  "logging",
  "parking_lot",
+ "rand 0.9.5",
  "serde",
+ "serde_json",
  "signing_method",
  "slashing_protection",
  "slot_clock",
@@ -6313,6 +6324,7 @@ dependencies = [
  "types",
  "validator_metrics",
  "validator_store",
+ "zeroize",
 ]
 
 [[package]]
@@ -9319,6 +9331,7 @@ dependencies = [
  "serde_json",
  "task_executor",
  "tracing",
+ "tree_hash",
  "types",
  "url",
  "validator_metrics",
@@ -10957,6 +10970,7 @@ dependencies = [
  "serde",
  "slot_clock",
  "task_executor",
+ "tempfile",
  "tokio",
  "tracing",
  "tree_hash",

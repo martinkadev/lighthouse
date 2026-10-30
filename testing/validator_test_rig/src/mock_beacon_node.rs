@@ -60,6 +60,29 @@ impl<E: EthSpec> MockBeaconNode<E> {
         }
     }
 
+    pub fn mock_randao_context(
+        &mut self,
+        slot: Slot,
+        context: &eth2::types::RandaoProposalContext,
+    ) -> Mock {
+        self.server
+            .mock("GET", format!("/lighthouse/randao/{slot}").as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::to_string(context).unwrap())
+            .create()
+    }
+
+    pub fn mock_randao_registration(&mut self) -> Mock {
+        self.server
+            .mock(
+                "POST",
+                "/eth/v1/beacon/pool/randao_commitment_registrations",
+            )
+            .with_status(200)
+            .create()
+    }
+
     /// Resets all mocks
     #[allow(dead_code)]
     pub fn reset_mocks(&mut self) {
