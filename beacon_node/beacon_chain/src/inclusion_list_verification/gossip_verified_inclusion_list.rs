@@ -195,6 +195,7 @@ fn verify_propagation_slot_range<S: SlotClock>(
 
     let earliest_permissible_slot = slot_clock
         .now_with_past_tolerance(spec.maximum_gossip_clock_disparity())
+        .or_else(|| slot_clock.now().filter(|slot| *slot == Slot::new(0)))
         .ok_or(BeaconChainError::UnableToReadSlot)?;
     if message_slot < earliest_permissible_slot {
         return Err(InclusionListVerificationError::PastSlot {
