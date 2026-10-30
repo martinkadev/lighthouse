@@ -24,6 +24,7 @@ arbitrary = ["dep:arbitrary", "types/arbitrary"]
 alloy-primitives = { workspace = true }
 arbitrary = { workspace = true, optional = true }
 bitvec = { workspace = true }
+blake3 = { workspace = true }
 bls = { workspace = true }
 builder_client = { workspace = true }
 educe = { workspace = true }

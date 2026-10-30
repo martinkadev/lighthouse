@@ -62,6 +62,7 @@ mod persisted_fork_choice;
 mod pre_finalization_cache;
 pub mod proposer_preferences_verification;
 pub mod proposer_prep_service;
+pub mod randao_commitment_verification;
 pub mod schema_change;
 pub mod shuffling_cache;
 pub mod single_attestation;
