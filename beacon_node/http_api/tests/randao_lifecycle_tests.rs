@@ -27,7 +27,11 @@ async fn randao_vc_http_registration_activation_proposal_restart_and_reorg() {
     };
     let genesis_state = harness.get_current_state();
     let genesis = genesis_state.genesis_validators_root();
-    let clock = ManualSlotClock::new(Slot::new(0), Duration::ZERO, spec.get_slot_duration());
+    let clock = ManualSlotClock::new(
+        Slot::new(0),
+        Duration::ZERO,
+        Duration::from_millis(spec.get_slot_duration_ms(Epoch::new(0))),
+    );
     let (store, pubkeys, keys_dir) = create_validator_store_with_genesis::<E>(
         clock.clone(),
         Arc::new(spec.clone()),
