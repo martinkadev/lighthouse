@@ -153,10 +153,9 @@ impl<S: ValidatorStore + 'static, T: SlotClock + 'static> RandaoRegistrationServ
             loop {
                 if let Some(slot) = self.slot_clock.now()
                     && should_register::<S::E>(slot, &spec)
+                    && let Err(e) = self.register_validators(slot).await
                 {
-                    if let Err(e) = self.register_validators(slot).await {
-                        error!(error = ?e, "Error during RANDAO commitment registration");
-                    }
+                    error!(error = ?e, "Error during RANDAO commitment registration");
                 }
 
                 if let Some(duration_to_next_slot) = self.slot_clock.duration_to_next_slot() {
