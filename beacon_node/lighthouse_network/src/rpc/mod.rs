@@ -535,7 +535,7 @@ where
                             peer_id,
                             request_id.connection_id,
                             request_id,
-                            request_type,
+                            *request_type,
                         );
                     }
                     ReadyRequest::Reject { request_id } => {
