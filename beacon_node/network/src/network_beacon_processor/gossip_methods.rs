@@ -4458,13 +4458,12 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 };
                 self.propagate_validation_result(message_id, peer_id, acceptance);
             }
-            Err(BlockProcessingError::RandaoCommitmentRegistrationInvalid { reason, .. })
-                if matches!(
-                    reason,
+            Err(BlockProcessingError::RandaoCommitmentRegistrationInvalid {
+                reason:
                     RandaoCommitmentRegistrationInvalidReason::CommitmentAlreadySet
-                        | RandaoCommitmentRegistrationInvalidReason::CommitmentAlreadyPending
-                ) =>
-            {
+                    | RandaoCommitmentRegistrationInvalidReason::CommitmentAlreadyPending,
+                ..
+            }) => {
                 self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Ignore);
             }
             Err(BlockProcessingError::RandaoCommitmentRegistrationInvalid { .. }) => {
