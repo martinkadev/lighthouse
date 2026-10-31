@@ -368,7 +368,7 @@ pub struct RandaoChainStore {
 impl RandaoChainStore {
     /// Open (or create) the store rooted at `validator_dir`.
     pub fn open_or_create<P: AsRef<Path>>(validator_dir: P) -> Result<Self, Error> {
-        Self::open_at(&validator_dir.as_ref().join(RANDAO_CHAIN_DIR))
+        Self::open_at(validator_dir.as_ref().join(RANDAO_CHAIN_DIR))
     }
 
     /// Open the store rooted at an arbitrary directory, creating it if necessary.
