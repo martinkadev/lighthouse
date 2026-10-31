@@ -386,7 +386,7 @@ pub fn process_randao<E: EthSpec, Payload: AbstractExecPayload<E>>(
 /// Compute an EIP8321hash-chain commitment from a reveal:
 /// `blake3(HASH_CHAIN_RANDAO_DST || reveal)`.
 pub fn hash_chain_commitment(reveal: Hash256) -> Hash256 {
-    let mut preimage = Vec::with_capacity(HASH_CHAIN_RANDAO_DST.len() + 32);
+    let mut preimage = Vec::with_capacity(HASH_CHAIN_RANDAO_DST.len().saturating_add(32));
     preimage.extend_from_slice(HASH_CHAIN_RANDAO_DST);
     preimage.extend_from_slice(reveal.as_slice());
     Hash256::from_slice(blake3::hash(&preimage).as_bytes())
