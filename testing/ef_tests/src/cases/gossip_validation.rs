@@ -809,6 +809,7 @@ impl<E: EthSpec> GossipTester<E> {
                 block_root,
                 PayloadVerificationStatus::Verified,
                 block_hash,
+                true,
             )
             .map_err(|e| {
                 Error::InternalError(format!(
