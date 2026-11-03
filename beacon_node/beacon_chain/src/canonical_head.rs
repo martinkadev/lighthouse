@@ -628,6 +628,21 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         self.cached_head_read_lock().clone()
     }
 
+    /// Reproduce explicit reference-fixture overrides of the finalized checkpoint.
+    /// This is available only to EF tests; live consensus state is never changed this way.
+    #[cfg(feature = "ef_tests")]
+    pub fn testing_override_finalized_checkpoint(
+        &self,
+        checkpoint: Checkpoint,
+    ) -> (Hash256, BeaconState<T::EthSpec>) {
+        let mut head = self.cached_head_write_lock();
+        let state_root = head.head_state_root();
+        head.finalized_checkpoint = checkpoint;
+        let snapshot = Arc::make_mut(&mut head.snapshot);
+        *snapshot.beacon_state.finalized_checkpoint_mut() = checkpoint;
+        (state_root, snapshot.beacon_state.clone())
+    }
+
     /// Access a read-lock for the cached head.
     ///
     /// This function is **not safe** to be public. See the module-level documentation for more

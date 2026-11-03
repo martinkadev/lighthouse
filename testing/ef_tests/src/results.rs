@@ -4,7 +4,45 @@ use std::path::Path;
 
 pub fn assert_tests_pass(handler_name: &str, path: &Path, results: &[CaseResult]) {
     let (failed, skipped_bls, skipped_known_failures) = categorize_results(results);
+    if cfg!(feature = "eip8321_tests")
+        && let Some(output) = std::env::var_os("EIP8321_RESULTS_PATH")
+    {
+        use std::io::Write;
+        let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("consensus-spec-tests/tests");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(output)
+            .expect("open EIP case results");
+        fs2::FileExt::lock_exclusive(&file).expect("lock EIP case results");
+        for case in results {
+            let relative = case
+                .path
+                .strip_prefix(&fixture_root)
+                .expect("case within fixture root");
+            if relative
+                .components()
+                .nth(1)
+                .is_some_and(|part| part.as_os_str() == "eip8321")
+            {
+                let status = match &case.result {
+                    Ok(()) => "passed",
+                    Err(Error::SkippedBls) => "skipped_bls",
+                    Err(Error::SkippedKnownFailure) => "skipped_known",
+                    Err(_) => "failed",
+                };
+                writeln!(file, "{}", serde_json::json!({"case": relative.to_string_lossy().replace('\\', "/"), "status": status})).expect("write EIP case results");
+            }
+        }
+        fs2::FileExt::unlock(&file).expect("unlock EIP case results");
+    }
 
+    if cfg!(feature = "eip8321_tests") {
+        assert!(
+            skipped_known_failures.is_empty(),
+            "EIP-8321 coverage contains known-failure exclusions: {handler_name}"
+        );
+    }
     if !failed.is_empty() || !skipped_bls.is_empty() || !skipped_known_failures.is_empty() {
         print_results(
             handler_name,
