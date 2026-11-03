@@ -7,6 +7,8 @@ edition = { workspace = true }
 [features]
 # `ef_tests` feature must be enabled to actually run the tests
 ef_tests = []
+# Run every supported EIP-8321 handler without unrelated historical fork vectors.
+eip8321_tests = ["ef_tests"]
 disable_rayon = []
 fake_crypto = ["bls/fake_crypto"]
 portable = ["beacon_chain/portable"]

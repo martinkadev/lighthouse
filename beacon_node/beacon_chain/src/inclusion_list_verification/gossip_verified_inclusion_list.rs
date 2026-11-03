@@ -193,8 +193,15 @@ fn verify_propagation_slot_range<S: SlotClock>(
         });
     }
 
+    // Clock disparity can reach before genesis during the first slot. Clamp the
+    // lower bound to genesis rather than treating that valid window as a clock failure.
+    let earliest_time = slot_clock
+        .now_duration()
+        .ok_or(BeaconChainError::UnableToReadSlot)?
+        .saturating_sub(spec.maximum_gossip_clock_disparity())
+        .max(slot_clock.genesis_duration());
     let earliest_permissible_slot = slot_clock
-        .now_with_past_tolerance(spec.maximum_gossip_clock_disparity())
+        .slot_of(earliest_time)
         .ok_or(BeaconChainError::UnableToReadSlot)?;
     if message_slot < earliest_permissible_slot {
         return Err(InclusionListVerificationError::PastSlot {

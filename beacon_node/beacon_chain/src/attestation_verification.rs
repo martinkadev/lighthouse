@@ -42,7 +42,7 @@ use crate::{
 };
 use bls::verify_signature_sets;
 use itertools::Itertools;
-use proto_array::Block as ProtoBlock;
+use proto_array::{Block as ProtoBlock, ExecutionVerdict};
 use slot_clock::SlotClock;
 use state_processing::{
     common::{
@@ -183,6 +183,12 @@ pub enum Error {
     /// The attestation may be valid once the payload envelope is retrieved; it's unclear if the
     /// attestation is valid or not, so it is ignored (not penalized) pending the envelope.
     UnknownPayloadEnvelope { beacon_block_root: Hash256 },
+    /// A payload-present attestation references an execution payload awaiting EL validation.
+    /// Ignore without penalizing the peer until the verdict is known.
+    OptimisticPayload { beacon_block_root: Hash256 },
+    /// A payload-present attestation references an execution payload rejected by the EL.
+    /// Reject and penalize the peer.
+    InvalidPayload { beacon_block_root: Hash256 },
     /// The `attestation.data.beacon_block_root` block is from before the finalized checkpoint.
     ///
     /// ## Peer scoring
@@ -624,13 +630,12 @@ impl<'a, T: BeaconChainTypes> IndexedAggregatedAttestation<'a, T> {
         // [New in Gloas]: `index == 1` claims the block's execution payload is present. Ignore the
         // attestation until we have seen the block's payload envelope, so it can be re-processed
         // (and the envelope retrieved) once the payload is received.
-        if fork_name.gloas_enabled()
-            && attestation.data().index == 1
-            && !head_block.payload_received
-        {
-            return Err(Error::UnknownPayloadEnvelope {
-                beacon_block_root: attestation.data().beacon_block_root,
-            });
+        if fork_name.gloas_enabled() && attestation.data().index == 1 {
+            verify_attested_execution_payload(
+                chain,
+                attestation.data(),
+                head_block.payload_received,
+            )?;
         }
 
         // Check the attestation target root is consistent with the head root.
@@ -964,11 +969,12 @@ impl<'a, T: BeaconChainTypes> IndexedUnaggregatedAttestation<'a, T> {
         // [New in Gloas]: `index == 1` claims the block's execution payload is present. Ignore the
         // attestation until we have seen the block's payload envelope, so it can be re-processed
         // (and the envelope retrieved) once the payload is received.
-        if fork_name.gloas_enabled() && attestation.data.index == 1 && !head_block.payload_received
-        {
-            return Err(Error::UnknownPayloadEnvelope {
-                beacon_block_root: attestation.data.beacon_block_root,
-            });
+        if fork_name.gloas_enabled() && attestation.data.index == 1 {
+            verify_attested_execution_payload(
+                chain,
+                &attestation.data,
+                head_block.payload_received,
+            )?;
         }
 
         // Check the attestation target root is consistent with the head root.
@@ -1228,6 +1234,29 @@ impl<'a, T: BeaconChainTypes> VerifiedUnaggregatedAttestation<'a, T> {
     /// to no-longer be valid.
     pub fn __indexed_attestation_mut(&mut self) -> &mut IndexedAttestation<T::EthSpec> {
         &mut self.indexed_attestation
+    }
+}
+
+/// Check the FULL payload verdict for an attestation claiming payload presence.
+fn verify_attested_execution_payload<T: BeaconChainTypes>(
+    chain: &BeaconChain<T>,
+    data: &AttestationData,
+    payload_received: bool,
+) -> Result<(), Error> {
+    let beacon_block_root = data.beacon_block_root;
+    if !payload_received {
+        return Err(Error::UnknownPayloadEnvelope { beacon_block_root });
+    }
+    match chain
+        .canonical_head
+        .fork_choice_read_lock()
+        .get_block_execution_status_assuming_full(&beacon_block_root)
+        .map_err(BeaconChainError::from)?
+    {
+        Some(ExecutionVerdict::Valid) => Ok(()),
+        Some(ExecutionVerdict::Optimistic) => Err(Error::OptimisticPayload { beacon_block_root }),
+        Some(ExecutionVerdict::Invalid) => Err(Error::InvalidPayload { beacon_block_root }),
+        None => Err(Error::HeadBlockFinalized { beacon_block_root }),
     }
 }
 

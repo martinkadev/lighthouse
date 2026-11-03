@@ -24,10 +24,10 @@ use std::time::Duration;
 use types::{
     AttesterSlashing, BeaconBlock, BeaconState, BlobSchedule, BlockImportSource, ChainSpec,
     Checkpoint, EthSpec, ExecPayload, ForkName, Hash256, ProposerSlashing, SignedAggregateAndProof,
-    SignedAggregateAndProofElectra, SignedBeaconBlock, SignedBlsToExecutionChange,
-    SignedContributionAndProof, SignedExecutionPayloadEnvelope, SignedInclusionList,
-    SignedRandaoCommitmentRegistration, SignedVoluntaryExit, SingleAttestation, Slot, SubnetId,
-    SyncCommitteeMessage, SyncSubnetId,
+    SignedAggregateAndProofElectra, SignedAggregateAndProofGloas, SignedBeaconBlock,
+    SignedBlsToExecutionChange, SignedContributionAndProof, SignedExecutionPayloadEnvelope,
+    SignedInclusionList, SignedRandaoCommitmentRegistration, SignedVoluntaryExit,
+    SingleAttestation, Slot, SubnetId, SyncCommitteeMessage, SyncSubnetId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -76,10 +76,11 @@ struct SetupBlock {
     #[serde(default)]
     failed: bool,
     #[serde(default)]
+    pending: bool,
+    #[serde(default)]
     payload_status: Option<PayloadStatus>,
     /// Signed execution payload envelope supplied alongside the block (Gloas+ networking vectors).
     #[serde(default)]
-    #[allow(dead_code)]
     payload: Option<String>,
 }
 
@@ -166,6 +167,18 @@ impl<E: EthSpec + TypeName> Case for GossipValidation<E> {
             bls_setting.check()?;
         }
 
+        // This published fixture omits bls_setting even though its expected rejection
+        // depends exclusively on BLS verification, which fake_crypto cannot perform.
+        if cfg!(feature = "fake_crypto")
+            && matches!(self.meta.topic, Topic::InclusionList)
+            && self.meta.messages.iter().any(|message| {
+                message.expected == ExpectedOutcome::Reject
+                    && message.reason.as_deref() == Some("invalid inclusion list signature")
+            })
+        {
+            return Err(Error::SkippedBls);
+        }
+
         let spec = Self::testing_spec(&self.path, fork_name)?;
         let tester = GossipTester::new(self, spec)?;
 
@@ -228,6 +241,9 @@ impl<E: EthSpec> GossipTester<E> {
         tester.set_time_ms(current_time_ms)?;
         tester.import_setup_blocks(case, &blocks, initial_block_index)?;
         tester.set_finalized_checkpoint(case.finalized_checkpoint(&blocks)?);
+        if matches!(case.meta.topic, Topic::InclusionList) {
+            tester.block_on_dangerous(tester.harness.chain.recompute_head_at_current_slot())?;
+        }
 
         Ok(tester)
     }
@@ -318,7 +334,7 @@ impl<E: EthSpec> GossipTester<E> {
         initial_block_index: Option<usize>,
     ) -> Result<(), Error> {
         for (index, setup_block) in case.meta.blocks.iter().enumerate() {
-            if setup_block.failed {
+            if setup_block.failed || setup_block.pending {
                 continue;
             }
             let block = blocks.get(&setup_block.block).ok_or_else(|| {
@@ -333,7 +349,7 @@ impl<E: EthSpec> GossipTester<E> {
                         "unknown payload envelope file {payload_name}"
                     ))
                 })?;
-                self.import_setup_payload(block, envelope)?;
+                self.import_setup_payload(block, envelope, setup_block.payload_status)?;
             }
         }
 
@@ -383,6 +399,7 @@ impl<E: EthSpec> GossipTester<E> {
             Topic::BeaconAggregateAndProof => self.process_beacon_aggregate_and_proof(
                 path,
                 message_meta,
+                fork_name,
                 message_id.clone(),
                 peer_id,
             )?,
@@ -540,13 +557,18 @@ impl<E: EthSpec> GossipTester<E> {
         &self,
         path: &Path,
         message_meta: &MessageMeta,
+        fork_name: ForkName,
         message_id: MessageId,
         peer_id: PeerId,
     ) -> Result<(), Error> {
-        let aggregate = ssz_decode_file::<SignedAggregateAndProofElectra<E>>(
-            &path.join(format!("{}.ssz_snappy", message_meta.message)),
-        )
-        .map(SignedAggregateAndProof::Electra)?;
+        let message_path = path.join(format!("{}.ssz_snappy", message_meta.message));
+        let aggregate = if fork_name.gloas_enabled() {
+            ssz_decode_file::<SignedAggregateAndProofGloas<E>>(&message_path)
+                .map(SignedAggregateAndProof::Gloas)?
+        } else {
+            ssz_decode_file::<SignedAggregateAndProofElectra<E>>(&message_path)
+                .map(SignedAggregateAndProof::Electra)?
+        };
         let seen_timestamp = self.set_message_time(message_meta)?;
 
         self.network_beacon_processor
@@ -586,13 +608,13 @@ impl<E: EthSpec> GossipTester<E> {
     ) -> Result<(), Error> {
         let inclusion_list: SignedInclusionList =
             ssz_decode_file(&path.join(format!("{}.ssz_snappy", message_meta.message)))?;
-        self.set_message_time(message_meta)?;
+        let seen_timestamp = self.set_message_time(message_meta)?;
 
         self.network_beacon_processor.process_gossip_inclusion_list(
             message_id,
             peer_id,
             Box::new(inclusion_list),
-            Duration::from_millis(self.current_time_ms),
+            seen_timestamp,
         );
         Ok(())
     }
@@ -716,7 +738,9 @@ impl<E: EthSpec> GossipTester<E> {
 
         match result {
             Ok(_) => {
-                if payload_status == Some(PayloadStatus::Invalidated) {
+                if payload_status == Some(PayloadStatus::Invalidated)
+                    && !block.message().fork_name_unchecked().gloas_enabled()
+                {
                     // The block has been imported optimistically. Mark its payload invalid in fork
                     // choice so descendants observe an invalid execution parent.
                     let head_hash = block
@@ -754,6 +778,7 @@ impl<E: EthSpec> GossipTester<E> {
         &self,
         block: &SignedBeaconBlock<E>,
         envelope: &SignedExecutionPayloadEnvelope<E>,
+        payload_status: Option<PayloadStatus>,
     ) -> Result<(), Error> {
         let block_root = block.canonical_root();
         let state_root = block.state_root();
@@ -807,7 +832,14 @@ impl<E: EthSpec> GossipTester<E> {
             .fork_choice_write_lock()
             .on_payload_envelope_received(
                 block_root,
-                PayloadVerificationStatus::Verified,
+                if matches!(
+                    payload_status,
+                    Some(PayloadStatus::NotValidated | PayloadStatus::Invalidated)
+                ) {
+                    PayloadVerificationStatus::Optimistic
+                } else {
+                    PayloadVerificationStatus::Verified
+                },
                 block_hash,
                 true,
             )
@@ -816,6 +848,17 @@ impl<E: EthSpec> GossipTester<E> {
                     "on_payload_envelope_received for {block_root:?} failed: {e:?}"
                 ))
             })?;
+
+        if payload_status == Some(PayloadStatus::Invalidated) {
+            self.block_on_dangerous(self.harness.chain.process_invalid_execution_payload(
+                &InvalidationOperation::InvalidateOne {
+                    head_hash: block_hash,
+                },
+            ))?
+            .map_err(|e| {
+                Error::InternalError(format!("setup payload invalidation failed: {e:?}"))
+            })?;
+        }
 
         Ok(())
     }
