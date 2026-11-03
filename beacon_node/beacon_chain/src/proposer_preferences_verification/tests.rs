@@ -246,6 +246,8 @@ fn proposal_slot_already_passed() {
         return;
     }
     let ctx = TestContext::new();
+    ctx.slot_clock
+        .advance_time(ctx.spec.maximum_gossip_clock_disparity() + Duration::from_nanos(1));
     let gossip = ctx.gossip_ctx();
 
     let prefs = make_signed_preferences(Slot::new(0), 0, Hash256::ZERO);

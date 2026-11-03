@@ -135,6 +135,8 @@ pub enum GossipDataColumnError {
     ///
     /// We cannot process the column without the referenced block, the peer isn't necessarily faulty.
     BlockRootUnknown { block_root: Hash256, slot: Slot },
+    /// The sidecar references a known-invalid beacon block.
+    KnownInvalidBlock { block_root: Hash256 },
     /// The data column slot does not match its referenced block slot.
     ///
     /// ## Peer scoring
@@ -1238,6 +1240,15 @@ pub fn validate_data_column_sidecar_for_gossip_gloas<
     verify_slot_greater_than_latest_finalized_slot(chain, column_slot)?;
     verify_is_unknown_sidecar(chain, &data_column)?;
 
+    if chain
+        .config
+        .invalid_block_roots
+        .contains(&data_column.block_root())
+    {
+        return Err(GossipDataColumnError::KnownInvalidBlock {
+            block_root: data_column.block_root(),
+        });
+    }
     let bid = load_gloas_payload_bid(data_column.block_root(), chain)?.ok_or(
         GossipDataColumnError::BlockRootUnknown {
             block_root: data_column.block_root(),

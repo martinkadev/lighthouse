@@ -1615,6 +1615,16 @@ where
         }
     }
 
+    /// Return a retained block for shuffling history, including ancestors of finalization.
+    pub fn get_retained_block(&self, block_root: &Hash256) -> Option<ProtoBlock> {
+        self.proto_array.get_block(block_root)
+    }
+
+    /// Return retained children when validating historical shuffling decision roots.
+    pub fn get_retained_children(&self, block_root: &Hash256) -> Vec<ProtoBlock> {
+        self.proto_array.get_children(block_root)
+    }
+
     /// Returns the blocks of the direct children of the block with `block_root`.
     ///
     /// Returns an empty vec if the block is unknown, has no children, or is not a

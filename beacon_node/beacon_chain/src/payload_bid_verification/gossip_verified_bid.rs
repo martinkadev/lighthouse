@@ -329,11 +329,23 @@ impl<E: EthSpec> GossipVerifiedPayloadBid<E> {
         let bid_parent = BidParent::from_bid(signed_bid.message());
         let bid_parent_block_root = signed_bid.message().parent_block_root();
         let bid_value = signed_bid.message().value();
-        let current_slot = ctx
+        // Current-or-next-slot gossip accepts both clock-disparity boundaries.
+        let earliest = ctx
             .slot_clock
-            .now()
+            .now_with_past_tolerance(
+                ctx.spec
+                    .maximum_gossip_clock_disparity()
+                    .saturating_add(std::time::Duration::from_nanos(1)),
+            )
             .ok_or(PayloadBidError::UnableToReadSlot)?;
-        verify_bid_slot(bid_slot, current_slot)?;
+        let latest = ctx
+            .slot_clock
+            .now_with_future_tolerance(ctx.spec.maximum_gossip_clock_disparity())
+            .ok_or(PayloadBidError::UnableToReadSlot)?
+            .saturating_add(1_u64);
+        if bid_slot < earliest || bid_slot > latest {
+            return Err(PayloadBidError::InvalidBidSlot { bid_slot });
+        }
 
         if ctx
             .gossip_verified_payload_bid_cache
@@ -480,6 +492,21 @@ impl<E: EthSpec> GossipVerifiedPayloadBid<E> {
             return Err(PayloadBidError::InvalidPrevRandao { slot: bid_slot });
         }
 
+        // Builder balances and pending payments change at epoch boundaries. The
+        // gossip specification checks them in the state advanced to the bid slot,
+        // after checking RANDAO against the unadvanced parent state.
+        let mut bid_state = head_state.clone();
+        state_processing::state_advance::complete_state_advance(
+            &mut bid_state,
+            None,
+            bid_slot,
+            None,
+            ctx.spec,
+        )
+        .map_err(|error| {
+            PayloadBidError::InternalError(format!("failed to advance bid state: {error:?}"))
+        })?;
+        let head_state = &bid_state;
         verify_bid_state_conditions(signed_bid.message(), head_state, ctx.spec)?;
 
         if parent_payload_exits_builder::<T>(

@@ -839,7 +839,8 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                             "Internal error when verifying column sidecar"
                         );
                     }
-                    GossipDataColumnError::ProposalSignatureInvalid
+                    GossipDataColumnError::KnownInvalidBlock { .. }
+                    | GossipDataColumnError::ProposalSignatureInvalid
                     | GossipDataColumnError::UnknownValidator(_)
                     | GossipDataColumnError::ProposerIndexMismatch { .. }
                     | GossipDataColumnError::IsNotLaterThanParent { .. }
@@ -1192,7 +1193,8 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                         "Internal error when verifying partial column sidecar"
                     );
                 }
-                GossipDataColumnError::InvalidVariant
+                GossipDataColumnError::KnownInvalidBlock { .. }
+                | GossipDataColumnError::InvalidVariant
                 | GossipDataColumnError::ProposalSignatureInvalid
                 | GossipDataColumnError::UnknownValidator(_)
                 | GossipDataColumnError::ProposerIndexMismatch { .. }
@@ -2964,7 +2966,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             AttnError::OptimisticPayload { .. } => {
                 self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Ignore);
             }
-            AttnError::InvalidPayload { .. } => {
+            AttnError::KnownInvalidHeadBlock { .. } | AttnError::InvalidPayload { .. } => {
                 self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Reject);
                 self.gossip_penalize_peer(
                     peer_id,
@@ -3882,7 +3884,8 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                         );
                     }
 
-                    EnvelopeError::BadSignature
+                    EnvelopeError::KnownInvalidBlock { .. }
+                    | EnvelopeError::BadSignature
                     | EnvelopeError::BuilderIndexMismatch { .. }
                     | EnvelopeError::SlotMismatch { .. }
                     | EnvelopeError::BlockHashMismatch { .. }
@@ -4674,7 +4677,8 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     "payload_attn_unknown_validator",
                 );
             }
-            PayloadAttestationError::InvalidSignature => {
+            PayloadAttestationError::KnownInvalidBlock { .. }
+            | PayloadAttestationError::InvalidSignature => {
                 self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Reject);
                 self.gossip_penalize_peer(
                     peer_id,

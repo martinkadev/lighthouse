@@ -175,6 +175,8 @@ pub enum Error {
     /// The attestation points to a block we have not yet imported. It's unclear if the attestation
     /// is valid or not.
     UnknownHeadBlock { beacon_block_root: Hash256 },
+    /// The referenced block is known to be invalid. Reject the message.
+    KnownInvalidHeadBlock { beacon_block_root: Hash256 },
     /// An attestation indicating the presence of a payload (`index == 1`) references a block whose
     /// execution payload envelope has not been seen yet.
     ///
@@ -1275,6 +1277,15 @@ fn verify_head_block_is_known<T: BeaconChainTypes>(
     attestation_data: &AttestationData,
     max_skip_slots: Option<u64>,
 ) -> Result<ProtoBlock, Error> {
+    if chain
+        .config
+        .invalid_block_roots
+        .contains(&attestation_data.beacon_block_root)
+    {
+        return Err(Error::KnownInvalidHeadBlock {
+            beacon_block_root: attestation_data.beacon_block_root,
+        });
+    }
     let block_opt = chain
         .canonical_head
         .fork_choice_read_lock()
@@ -1342,7 +1353,10 @@ pub fn verify_propagation_slot_range<S: SlotClock, E: EthSpec>(
 
     // Taking advantage of saturating subtraction on `Slot`.
     let one_epoch_prior = slot_clock
-        .now_with_past_tolerance(spec.maximum_gossip_clock_disparity())
+        .now_with_past_tolerance(
+            spec.maximum_gossip_clock_disparity()
+                .saturating_add(std::time::Duration::from_nanos(1)),
+        )
         .ok_or(BeaconChainError::UnableToReadSlot)?
         - E::slots_per_epoch();
 

@@ -27,6 +27,7 @@ pub struct GossipVerificationContext<'a, T: BeaconChainTypes> {
     pub validator_pubkey_cache: &'a RwLock<ValidatorPubkeyCache<T>>,
     pub store: &'a BeaconStore<T>,
     pub genesis_validators_root: Hash256,
+    pub invalid_block_roots: &'a std::collections::HashSet<Hash256>,
 }
 
 /// A `PayloadAttestationMessage` that has been verified for propagation on the gossip network.
@@ -81,6 +82,9 @@ impl<T: BeaconChainTypes> VerifiedPayloadAttestationMessage<T> {
         // 2. Blocks we've seen that are invalid (REJECT).
         // Presently both cases return IGNORE.
         let beacon_block_root = payload_attestation_message.data.beacon_block_root;
+        if ctx.invalid_block_roots.contains(&beacon_block_root) {
+            return Err(Error::KnownInvalidBlock { beacon_block_root });
+        }
         let block = ctx
             .canonical_head
             .fork_choice_read_lock()
@@ -194,6 +198,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             validator_pubkey_cache: &self.validator_pubkey_cache,
             store: &self.store,
             genesis_validators_root: self.genesis_validators_root,
+            invalid_block_roots: &self.config.invalid_block_roots,
         }
     }
 
@@ -246,7 +251,10 @@ fn verify_propagation_slot_range<S: SlotClock>(
     }
 
     let earliest_permissible_slot = slot_clock
-        .now_with_past_tolerance(spec.maximum_gossip_clock_disparity())
+        .now_with_past_tolerance(
+            spec.maximum_gossip_clock_disparity()
+                .saturating_add(std::time::Duration::from_nanos(1)),
+        )
         .ok_or(BeaconChainError::UnableToReadSlot)?;
     if message_slot < earliest_permissible_slot {
         return Err(Error::PastSlot {

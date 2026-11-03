@@ -3,7 +3,7 @@ use crate::inclusion_list_store::{InclusionListKey, InclusionListStore, InsertOu
 use crate::inclusion_list_verification::{
     InclusionListVerificationError, verify_inclusion_list_transactions_bounds,
 };
-use crate::shuffling_cache::{ShufflingCache, with_cached_shuffling};
+use crate::shuffling_cache::ShufflingCache;
 use crate::validator_pubkey_cache::ValidatorPubkeyCache;
 use crate::{BeaconChain, BeaconChainError, BeaconChainTypes, BeaconStore, metrics};
 use eth2::types::{EventKind, ForkVersionedResponse};
@@ -14,7 +14,7 @@ use state_processing::per_block_processing::signature_sets::inclusion_list_signa
 use std::borrow::Cow;
 use std::time::Duration;
 use tracing::debug;
-use types::{ChainSpec, EthSpec, Hash256, SignedInclusionList, Slot};
+use types::{ChainSpec, EthSpec, Hash256, RelativeEpoch, SignedInclusionList, Slot};
 
 pub struct GossipVerificationContext<'a, T: BeaconChainTypes> {
     pub canonical_head: &'a CanonicalHead<T>,
@@ -87,7 +87,7 @@ impl GossipVerifiedInclusionList {
 
         // [IGNORE] The dependent block has been seen and passes validation.
         let dependent_block = fork_choice_read
-            .get_block(&dependent_root)
+            .get_retained_block(&dependent_root)
             .ok_or(InclusionListVerificationError::DependentRootUnknown { dependent_root })?;
 
         // [REJECT] The dependent block is not after `dependent_slot`.
@@ -101,7 +101,7 @@ impl GossipVerifiedInclusionList {
 
         // [IGNORE] The dependent block is a possible dependent block for `epoch`.
         let has_qualifying_child = fork_choice_read
-            .get_children(&dependent_root)
+            .get_retained_children(&dependent_root)
             .iter()
             .any(|child| child.slot > dependent_slot);
         if !has_qualifying_child && dependent_root != head_block_root {
@@ -110,28 +110,32 @@ impl GossipVerifiedInclusionList {
 
         drop(fork_choice_read);
 
-        // The checks above confirm `dependent_root` is the shuffling decision block for `epoch`.
-        let committee = with_cached_shuffling(
-            ctx.canonical_head,
-            ctx.shuffling_cache,
-            ctx.store,
-            ctx.builder_onboarding_cache,
-            ctx.spec,
-            dependent_root,
-            epoch,
-            |cached_shuffling, _| {
-                cached_shuffling
-                    .committee_cache
-                    .get_inclusion_list_committee_at_slot(
-                        slot,
-                        T::EthSpec::inclusion_list_committee_size(),
-                    )
-                    .map_err(InclusionListVerificationError::from)
-            },
-        )?;
+        // The dependent block can precede finalization and be more than one
+        // epoch behind the message. Resolve its branch's state at the lookahead
+        // boundary, rather than treating the dependent block as a current head.
+        let target_slot = std::cmp::max(lookahead_start_slot, dependent_block.slot);
+        let (state_root, mut state) = ctx
+            .store
+            .get_advanced_hot_state(dependent_root, target_slot, dependent_block.state_root)
+            .map_err(BeaconChainError::DBError)?
+            .ok_or(InclusionListVerificationError::DependentRootUnknown { dependent_root })?;
+        if state.slot() < target_slot {
+            state_processing::state_advance::partial_state_advance(
+                &mut state,
+                Some(state_root),
+                target_slot,
+                ctx.builder_onboarding_cache,
+                ctx.spec,
+            )
+            .map_err(BeaconChainError::from)?;
+        }
+        let relative_epoch = RelativeEpoch::from_epoch(state.current_epoch(), epoch)
+            .map_err(BeaconChainError::IncorrectStateForAttestation)?;
+        state.build_committee_cache(relative_epoch, ctx.spec)?;
+        let committee = state.get_inclusion_list_committee(slot)?;
 
         // [REJECT] The validator is a member of the inclusion list committee.
-        if !committee.contains(&(validator_index as usize)) {
+        if !committee.contains(&validator_index) {
             return Err(InclusionListVerificationError::NotInCommittee {
                 validator_index,
                 slot,
@@ -199,6 +203,7 @@ fn verify_propagation_slot_range<S: SlotClock>(
         .now_duration()
         .ok_or(BeaconChainError::UnableToReadSlot)?
         .saturating_sub(spec.maximum_gossip_clock_disparity())
+        .saturating_sub(Duration::from_nanos(1))
         .max(slot_clock.genesis_duration());
     let earliest_permissible_slot = slot_clock
         .slot_of(earliest_time)
