@@ -36,6 +36,8 @@ jobs:
         run: testing/ef_tests/download_eip8321_vectors.sh "${{ matrix.preset }}"
 
       - name: Run EIP-8321 EF suites
+        env:
+          EIP8321_RESULTS_PATH: ${{ runner.temp }}/case-results.jsonl
         run: |
           features=eip8321_tests,portable
           if [ "${{ matrix.preset }}" = minimal ]; then
@@ -46,3 +48,29 @@ jobs:
           fi
           cargo test --locked -p ef_tests --release --features "$features" \
             --test tests -- --test-threads=1 --nocapture
+
+      - name: Upload per-case outcomes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eip8321-results-${{ matrix.preset }}-${{ matrix.crypto }}
+          path: ${{ runner.temp }}/case-results.jsonl
+          if-no-files-found: error
+
+  eip8321-coverage:
+    name: eip8321-coverage (${{ matrix.preset }})
+    needs: [eip8321-vectors]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        preset: [mainnet, minimal]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download published fixtures
+        run: testing/ef_tests/download_eip8321_vectors.sh "${{ matrix.preset }}"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eip8321-results-${{ matrix.preset }}-*
+          path: results
+      - name: Require every executable fixture to pass
+        run: python3 testing/ef_tests/check_eip8321_coverage.py "${{ matrix.preset }}" results/*/case-results.jsonl
