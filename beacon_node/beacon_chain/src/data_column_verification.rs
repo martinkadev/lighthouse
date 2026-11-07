@@ -1323,10 +1323,6 @@ fn validate_partial_data_column_sidecar_for_gossip_fulu<T: BeaconChainTypes>(
 
     // Remove the header (if any) to avoid wasted memory.
     let header = column.sidecar.header.take();
-    if header.is_none() && column.sidecar.column.is_empty() {
-        return PartialColumnVerificationResult::Err(GossipPartialDataColumnError::EmptyMessage);
-    }
-
     let header = if let Some(header) = header {
         // Header was sent, so it is required to be valid
         match chain.verify_partial_data_column_header_for_gossip(block_root, header) {
@@ -1347,10 +1343,19 @@ fn validate_partial_data_column_sidecar_for_gossip_fulu<T: BeaconChainTypes>(
             .get_header(&block_root)
             .map(GossipVerifiedPartialDataColumnHeader::new_from_cached)
         else {
-            return PartialColumnVerificationResult::Err(
-                GossipPartialDataColumnError::MissingHeader,
-            );
+            let error = if column.sidecar.column.is_empty() {
+                GossipPartialDataColumnError::EmptyMessage
+            } else {
+                GossipPartialDataColumnError::MissingHeader
+            };
+            return PartialColumnVerificationResult::Err(error);
         };
+        if column.sidecar.column.is_empty() {
+            return PartialColumnVerificationResult::ErrWithValidHeader {
+                err: GossipPartialDataColumnError::EmptyMessage,
+                header,
+            };
+        }
 
         header
     };
