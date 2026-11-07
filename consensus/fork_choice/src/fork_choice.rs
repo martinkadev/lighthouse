@@ -5,7 +5,7 @@ use logging::crit;
 use proto_array::{
     Block as ProtoBlock, ExecutionStatus, ExecutionVerdict, ForkChoiceNode, JustifiedBalances,
     LatestMessage, PayloadBlockHash, PayloadStatus, ProposerHeadError, ProposerHeadInfo,
-    ProtoArrayForkChoice, ReOrgThreshold,
+    ProtoArrayForkChoice,
 };
 use ssz_derive::{Decode, Encode};
 use state_processing::{
@@ -247,17 +247,6 @@ pub enum PayloadVerificationStatus {
     Optimistic,
     /// The block is either pre-merge-fork, or prior to the terminal PoW block.
     Irrelevant,
-}
-
-impl PayloadVerificationStatus {
-    /// Returns `true` if the payload was optimistically imported.
-    pub fn is_optimistic(&self) -> bool {
-        match self {
-            PayloadVerificationStatus::Verified => false,
-            PayloadVerificationStatus::Optimistic => true,
-            PayloadVerificationStatus::Irrelevant => false,
-        }
-    }
 }
 
 /// Calculate how far `slot` lies from the start of its epoch.
@@ -547,19 +536,21 @@ where
         }
     }
 
-    /// Returns the dependent root for `block_root`, per the spec `get_shuffling_dependent_root` helper.
-    fn get_shuffling_dependent_root(
+    /// Returns the shuffling dependent root of `epoch` on the chain of `block_root`.
+    ///
+    /// Returns `None` if the dependent slot is prior to the fork choice anchor.
+    ///
+    /// ## Specification
+    ///
+    /// Equivalent to:
+    ///
+    /// https://github.com/ethereum/consensus-specs/blob/master/specs/gloas/fork-choice.md#modified-get_shuffling_dependent_root
+    pub fn get_shuffling_dependent_root(
         &self,
         block_root: Hash256,
-        current_slot: Slot,
+        epoch: Epoch,
         spec: &ChainSpec,
     ) -> Result<Option<Hash256>, Error<T::Error>> {
-        let epoch = current_slot.epoch(E::slots_per_epoch());
-
-        if epoch <= spec.min_seed_lookahead {
-            return Ok(Some(Hash256::zero()));
-        }
-
         let dependent_slot = epoch
             .saturating_sub(spec.min_seed_lookahead)
             .start_slot(E::slots_per_epoch())
@@ -639,9 +630,7 @@ where
         &self,
         current_slot: Slot,
         canonical_head: Hash256,
-        re_org_head_threshold: ReOrgThreshold,
-        re_org_parent_threshold: ReOrgThreshold,
-        max_epochs_since_finalization: Epoch,
+        spec: &ChainSpec,
     ) -> Result<ProposerHeadInfo, ProposerHeadError<Error<proto_array::Error>>> {
         // Ensure that fork choice has already been updated for the current slot. This prevents
         // us from having to take a write lock or do any dequeueing of attestations in this
@@ -671,9 +660,7 @@ where
                 current_slot,
                 canonical_head,
                 self.fc_store.justified_balances(),
-                re_org_head_threshold,
-                re_org_parent_threshold,
-                max_epochs_since_finalization,
+                spec,
             )
             .map_err(ProposerHeadError::convert_inner_error)
     }
@@ -681,9 +668,7 @@ where
     pub fn get_preliminary_proposer_head(
         &self,
         canonical_head: Hash256,
-        re_org_head_threshold: ReOrgThreshold,
-        re_org_parent_threshold: ReOrgThreshold,
-        max_epochs_since_finalization: Epoch,
+        spec: &ChainSpec,
     ) -> Result<ProposerHeadInfo, ProposerHeadError<Error<proto_array::Error>>> {
         let current_slot = self.fc_store.get_current_slot();
         self.proto_array
@@ -691,9 +676,7 @@ where
                 current_slot,
                 canonical_head,
                 self.fc_store.justified_balances(),
-                re_org_head_threshold,
-                re_org_parent_threshold,
-                max_epochs_since_finalization,
+                spec,
             )
             .map_err(ProposerHeadError::convert_inner_error)
     }
@@ -725,6 +708,7 @@ where
         block_root: Hash256,
         payload_verification_status: PayloadVerificationStatus,
         payload_block_hash: ExecutionBlockHash,
+        inclusion_list_satisfied: bool,
     ) -> Result<(), Error<T::Error>> {
         let execution_status = match payload_verification_status {
             PayloadVerificationStatus::Verified => ExecutionStatus::Valid(payload_block_hash),
@@ -744,7 +728,7 @@ where
         // `on_payload_envelope_received` promotes the ancestry itself, starting at this node's
         // own `FULL` side.
         self.proto_array
-            .on_payload_envelope_received(block_root, execution_status)
+            .on_payload_envelope_received(block_root, execution_status, inclusion_list_satisfied)
             .map_err(Error::FailedToProcessValidExecutionPayload)?;
 
         Ok(())
@@ -907,11 +891,12 @@ where
         let is_first_block = self.fc_store.proposer_boost_root().is_zero();
 
         if is_timely && is_first_block {
+            let current_epoch = current_slot.epoch(E::slots_per_epoch());
             // The block isn't in fork choice so resolve its dependent root via its parent.
             let block_dependent_root =
-                self.get_shuffling_dependent_root(block.parent_root(), current_slot, spec)?;
+                self.get_shuffling_dependent_root(block.parent_root(), current_epoch, spec)?;
             let head_dependent_root =
-                self.get_shuffling_dependent_root(head_root, current_slot, spec)?;
+                self.get_shuffling_dependent_root(head_root, current_epoch, spec)?;
 
             // Add proposer score boost if the block is timely, not conflicting with an
             // existing block, with the same dependent root as the canonical chain head.
@@ -1648,6 +1633,22 @@ where
     pub fn is_payload_received(&self, block_root: &Hash256) -> bool {
         self.proto_array.is_payload_received(block_root)
             && self.is_finalized_checkpoint_or_descendant(*block_root)
+    }
+
+    /// Returns `true` if the PTC majority voted that the payload for `block_root` was timely,
+    /// regardless of whether this node has received the payload itself.
+    ///
+    /// Returns `false` for unknown or pre-Gloas blocks.
+    pub fn ptc_votes_payload_timely(&self, block_root: &Hash256) -> bool {
+        self.proto_array.ptc_votes_payload_timely::<E>(block_root)
+    }
+
+    /// Returns `true` if the PTC majority voted that the blob data for `block_root` was
+    /// available, regardless of this node's own availability view.
+    ///
+    /// Returns `false` for unknown or pre-Gloas blocks.
+    pub fn ptc_votes_data_available(&self, block_root: &Hash256) -> bool {
+        self.proto_array.ptc_votes_data_available::<E>(block_root)
     }
 
     /// Returns `true` if the block's parent is imported (and, for a post-Gloas FULL child, its

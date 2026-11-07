@@ -20,7 +20,7 @@ use bls::AggregateSignature;
 use execution_layer::{
     PayloadStatusV1, PayloadStatusV1Status, json_structures::JsonPayloadStatusV1Status,
 };
-use proto_array::{PayloadBlockHash, ReOrgThreshold};
+use proto_array::PayloadBlockHash;
 use serde::Deserialize;
 use ssz_derive::Decode;
 use ssz_types::VariableList;
@@ -40,9 +40,9 @@ use std::time::Duration;
 use types::{
     Attestation, AttestationRef, AttesterSlashing, AttesterSlashingRef, BeaconBlock, BeaconState,
     BlobSidecar, BlobsList, BlockImportSource, Checkpoint, DataColumnSidecar,
-    DataColumnSidecarList, DataColumnSubnetId, Epoch, ExecutionBlockHash, Hash256,
-    IndexedAttestation, IndexedPayloadAttestation, KzgProof, PayloadAttestationMessage,
-    ProposerPreparationData, SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot, Uint256,
+    DataColumnSidecarList, DataColumnSubnetId, ExecutionBlockHash, Hash256, IndexedAttestation,
+    IndexedPayloadAttestation, KzgProof, PayloadAttestationMessage, ProposerPreparationData,
+    SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot, Uint256,
 };
 
 // When set to true, cache any states fetched from the db.
@@ -745,10 +745,10 @@ impl<E: EthSpec> Tester<E> {
 
     fn tick_to_slot(&self, tick: u64) -> Result<Slot, Error> {
         let genesis_time = self.harness.chain.slot_clock.genesis_duration().as_secs();
-        let since_genesis = tick
-            .checked_sub(genesis_time)
-            .ok_or_else(|| Error::FailedToParseTest("tick is prior to genesis".into()))?;
-        let slots_since_genesis = since_genesis / self.spec.get_slot_duration().as_secs();
+        let slots_since_genesis = self
+            .spec
+            .compute_slot_at_time::<E>(genesis_time, tick)
+            .map_err(|_| Error::FailedToParseTest("tick is prior to genesis".into()))?;
         Ok(self.spec.genesis_slot + slots_since_genesis)
     }
 
@@ -835,7 +835,7 @@ impl<E: EthSpec> Tester<E> {
         let result: Result<Result<Hash256, ()>, _> = self
             .block_on_dangerous(self.harness.chain.process_block(
                 block_root,
-                LookupBlock::new(block.clone()),
+                LookupBlock::new(block_root, block.clone()),
                 NotifyExecutionLayer::Yes,
                 BlockImportSource::Lookup,
                 || Ok(()),
@@ -944,7 +944,7 @@ impl<E: EthSpec> Tester<E> {
         let result: Result<Result<Hash256, ()>, _> = self
             .block_on_dangerous(self.harness.chain.process_block(
                 block_root,
-                LookupBlock::new(block.clone()),
+                LookupBlock::new(block_root, block.clone()),
                 NotifyExecutionLayer::Yes,
                 BlockImportSource::Lookup,
                 || Ok(()),
@@ -1252,13 +1252,7 @@ impl<E: EthSpec> Tester<E> {
         let mut fc = self.harness.chain.canonical_head.fork_choice_write_lock();
         let slot = self.harness.chain.slot().unwrap();
         let canonical_head = fc.get_head(slot, &self.harness.spec).unwrap().root();
-        let proposer_head_result = fc.get_proposer_head(
-            slot,
-            canonical_head,
-            ReOrgThreshold(self.spec.reorg_head_weight_threshold),
-            ReOrgThreshold(self.spec.reorg_parent_weight_threshold),
-            Epoch::new(self.spec.reorg_max_epochs_since_finalization),
-        );
+        let proposer_head_result = fc.get_proposer_head(slot, canonical_head, &self.spec);
         let proposer_head = match proposer_head_result {
             Ok(head) => head.parent_node.root(),
             Err(ProposerHeadError::DoNotReOrg(_)) => canonical_head,
@@ -1358,6 +1352,7 @@ impl<E: EthSpec> Tester<E> {
                     block_root,
                     PayloadVerificationStatus::Verified,
                     block_hash,
+                    true,
                 )
                 .map_err(|e| {
                     Error::InternalError(format!(
@@ -1398,7 +1393,7 @@ impl<E: EthSpec> Tester<E> {
         let actual = fork_choice
             .proto_array()
             .core_proto_array()
-            .filtered_block_tree_leaves_and_weights::<E>(
+            .filtered_node_tree_leaves_and_weights::<E>(
                 &justified.root,
                 current_slot,
                 justified,
@@ -1409,7 +1404,7 @@ impl<E: EthSpec> Tester<E> {
             )
             .map_err(|e| {
                 Error::InternalError(format!(
-                    "filtered_block_tree_leaves_and_weights failed: {e:?}"
+                    "filtered_node_tree_leaves_and_weights failed: {e:?}"
                 ))
             })?;
         drop(fork_choice);
@@ -1727,12 +1722,12 @@ impl<E: EthSpec> Tester<E> {
             .nodes
             .get(*node_index)
             .ok_or_else(|| Error::InternalError(format!("Node index {} not found", node_index)))?;
-        let v29 = node
-            .as_v29()
-            .map_err(|_| Error::InternalError("Node is not V29".to_string()))?;
+        let v33 = node
+            .as_v33()
+            .map_err(|_| Error::InternalError("Node is not V33".to_string()))?;
 
-        let timeliness_votes = &v29.payload_timeliness_votes;
-        let participation = &v29.ptc_participation;
+        let timeliness_votes = &v33.payload_timeliness_votes;
+        let participation = &v33.ptc_participation;
 
         for (i, expected_vote) in expected.votes.iter().enumerate() {
             let actual = if !participation.get(i).unwrap() {
@@ -1771,12 +1766,12 @@ impl<E: EthSpec> Tester<E> {
             .nodes
             .get(*node_index)
             .ok_or_else(|| Error::InternalError(format!("Node index {} not found", node_index)))?;
-        let v29 = node
-            .as_v29()
-            .map_err(|_| Error::InternalError("Node is not V29".to_string()))?;
+        let v33 = node
+            .as_v33()
+            .map_err(|_| Error::InternalError("Node is not V33".to_string()))?;
 
-        let availability_votes = &v29.payload_data_availability_votes;
-        let participation = &v29.ptc_participation;
+        let availability_votes = &v33.payload_data_availability_votes;
+        let participation = &v33.ptc_participation;
 
         for (i, expected_vote) in expected.votes.iter().enumerate() {
             let actual = if !participation.get(i).unwrap() {

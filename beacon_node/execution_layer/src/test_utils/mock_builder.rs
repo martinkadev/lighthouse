@@ -471,7 +471,7 @@ impl<E: EthSpec> MockBuilder<E> {
                 // TODO(EIP7732) Check if this is how we want to do error handling for gloas
                 return Err("invalid fork".to_string());
             }
-            SignedBlindedBeaconBlock::Heze(_) => {
+            SignedBlindedBeaconBlock::Heze(_) | SignedBlindedBeaconBlock::Eip8321(_) => {
                 // TODO(heze) Check if this is how we want to do error handling for heze
                 return Err("invalid fork".to_string());
             }
@@ -588,7 +588,7 @@ impl<E: EthSpec> MockBuilder<E> {
                         // TODO(EIP7732) Check if this is how we want to do error handling for gloas
                         return Err("invalid fork".to_string());
                     }
-                    ForkName::Heze => {
+                    ForkName::Heze | ForkName::Eip8321 => {
                         // TODO(heze) Check if this is how we want to do error handling for heze
                         return Err("invalid fork".to_string());
                     }
@@ -869,8 +869,10 @@ impl<E: EthSpec> MockBuilder<E> {
                 .data
                 .genesis_time
         };
-        let timestamp =
-            (slots_since_genesis * self.spec.get_slot_duration().as_secs()) + genesis_time;
+        let timestamp = self
+            .spec
+            .compute_time_at_slot::<E>(genesis_time, Slot::new(slots_since_genesis))
+            .map_err(|e| format!("couldn't compute the payload timestamp: {e:?}"))?;
 
         let head_state: BeaconState<E> = self
             .beacon_client
@@ -931,7 +933,7 @@ impl<E: EthSpec> MockBuilder<E> {
                 None, // TODO(gloas): pass target_gas_limit
                 None,
             ),
-            ForkName::Heze => PayloadAttributes::new(
+            ForkName::Heze | ForkName::Eip8321 => PayloadAttributes::new(
                 timestamp,
                 *prev_randao,
                 fee_recipient,

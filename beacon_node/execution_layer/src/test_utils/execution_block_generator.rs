@@ -941,7 +941,12 @@ impl<E: EthSpec> ExecutionBlockGenerator<E> {
             self.blobs_bundles.insert(id, bundle);
         }
 
-        let block_hash = if let PayloadAttributes::V4(attributes) = attributes {
+        let parent_beacon_block_root = match attributes {
+            PayloadAttributes::V4(attributes) => Some(attributes.parent_beacon_block_root),
+            PayloadAttributes::V5(attributes) => Some(attributes.parent_beacon_block_root),
+            _ => None,
+        };
+        let block_hash = if let Some(parent_beacon_block_root) = parent_beacon_block_root {
             let default_execution_requests = ExecutionRequests::Gloas(Default::default());
             let execution_requests = execution_requests
                 .as_ref()
@@ -952,7 +957,7 @@ impl<E: EthSpec> ExecutionBlockGenerator<E> {
             };
             calculate_execution_block_hash(
                 execution_payload.to_ref(),
-                Some(attributes.parent_beacon_block_root),
+                Some(parent_beacon_block_root),
                 Some(execution_requests_ref),
             )
             .0
@@ -1132,7 +1137,7 @@ pub fn generate_genesis_header<E: EthSpec>(spec: &ChainSpec) -> Option<Execution
             *header.transactions_root_mut() = empty_transactions_root;
             Some(header)
         }
-        ForkName::Heze => {
+        ForkName::Heze | ForkName::Eip8321 => {
             // TODO(heze): we are using a Fulu header for now, but this gets fixed up by the
             // genesis builder anyway which translates it to bid/latest_block_hash.
             let mut header = ExecutionPayloadHeader::Fulu(<_>::default());

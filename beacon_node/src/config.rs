@@ -801,7 +801,9 @@ pub fn get_config<E: EthSpec>(
     client_config.chain.prepare_payload_lookahead =
         clap_utils::parse_optional(cli_args, "prepare-payload-lookahead")?
             .map(Duration::from_millis)
-            .unwrap_or_else(|| spec.get_slot_duration() / DEFAULT_PREPARE_PAYLOAD_LOOKAHEAD_FACTOR);
+            .unwrap_or_else(|| {
+                spec.genesis_slot_duration() / DEFAULT_PREPARE_PAYLOAD_LOOKAHEAD_FACTOR
+            });
 
     client_config.chain.always_prepare_payload = cli_args.get_flag("always-prepare-payload");
 
@@ -830,6 +832,16 @@ pub fn get_config<E: EthSpec>(
         clap_utils::parse_required(cli_args, "builder-fallback-epochs-since-finalization")?;
     client_config.chain.builder_fallback_disable_checks =
         cli_args.get_flag("builder-fallback-disable-checks");
+    client_config.chain.builder_bid_streaming = cli_args.get_flag("builder-bid-streaming");
+    let builder_fallback_ban_slots: u64 =
+        clap_utils::parse_required(cli_args, "builder-fallback-ban-slots")?;
+    if builder_fallback_ban_slots < E::slots_per_epoch() {
+        return Err(format!(
+            "--builder-fallback-ban-slots must be at least SLOTS_PER_EPOCH ({})",
+            E::slots_per_epoch()
+        ));
+    }
+    client_config.chain.builder_fallback_ban_slots = builder_fallback_ban_slots;
 
     // Graphical user interface config.
     if cli_args.get_flag("gui") {
@@ -1210,6 +1222,15 @@ pub fn set_network_config(
         config.target_peers = target_peers_str
             .parse::<usize>()
             .map_err(|_| format!("Invalid number of target peers: {}", target_peers_str))?;
+    }
+
+    if let Some(unknown_root_min_peers) =
+        clap_utils::parse_optional(cli_args, "unknown-root-min-peers")?
+    {
+        if unknown_root_min_peers == 0 {
+            return Err("--unknown-root-min-peers must be a non-zero value".to_string());
+        }
+        config.unknown_root_min_peers = unknown_root_min_peers;
     }
 
     if let Some(value) = cli_args.get_one::<String>("network-load") {

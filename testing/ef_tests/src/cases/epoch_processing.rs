@@ -90,6 +90,9 @@ pub struct ProposerLookahead;
 pub struct PtcWindow;
 #[derive(Debug)]
 pub struct BuilderPendingPayments;
+#[derive(Debug)]
+#[allow(dead_code)] // Constructed by the integration-test handler.
+pub struct PendingRandaoCommitments;
 
 type_name!(
     JustificationAndFinalization,
@@ -114,6 +117,7 @@ type_name!(ParticipationFlagUpdates, "participation_flag_updates");
 type_name!(ProposerLookahead, "proposer_lookahead");
 type_name!(PtcWindow, "ptc_window");
 type_name!(BuilderPendingPayments, "builder_pending_payments");
+type_name!(PendingRandaoCommitments, "pending_randao_commitments");
 
 impl<E: EthSpec> EpochTransition<E> for JustificationAndFinalization {
     fn run(state: &mut BeaconState<E>, spec: &ChainSpec) -> Result<(), EpochProcessingError> {
@@ -176,6 +180,12 @@ impl<E: EthSpec> EpochTransition<E> for Slashings {
             )?;
         }
         Ok(())
+    }
+}
+
+impl<E: EthSpec> EpochTransition<E> for PendingRandaoCommitments {
+    fn run(state: &mut BeaconState<E>, spec: &ChainSpec) -> Result<(), EpochProcessingError> {
+        state_processing::per_epoch_processing::process_pending_randao_commitments(state, spec)
     }
 }
 
@@ -433,6 +443,11 @@ impl<E: EthSpec, T: EpochTransition<E>> Case for EpochProcessing<E, T> {
             return false;
         }
 
+        // EIP-8321 vectors live under the `eip8321` feature directory, not per-fork dirs.
+        if T::name() == "pending_randao_commitments" {
+            return false;
+        }
+
         true
     }
 
@@ -449,6 +464,7 @@ impl<E: EthSpec, T: EpochTransition<E>> Case for EpochProcessing<E, T> {
                     | "pending_consolidations"
                     | "pending_deposits"
                     | "pending_deposits_churn"
+                    | "pending_randao_commitments"
                     | "proposer_lookahead"
                     | "ptc_window"
                     | "randao_mixes_reset"

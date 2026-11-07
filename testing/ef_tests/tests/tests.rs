@@ -62,6 +62,16 @@ fn operations_block_header() {
 }
 
 #[test]
+fn operations_randao() {
+    OperationsHandler::<Spec, RandaoBlock<_>>::default().run();
+}
+
+#[test]
+fn operations_randao_commitment_registration() {
+    OperationsHandler::<Spec, RandaoCommitmentRegistrationOperation>::default().run();
+}
+
+#[test]
 fn operations_sync_aggregate() {
     OperationsHandler::<Spec, SyncAggregate<_>>::default().run();
 }
@@ -368,6 +378,7 @@ mod ssz_static {
         SszStaticHandler::<LightClientBootstrapDeneb<Spec>, Spec>::deneb_only().run();
         SszStaticHandler::<LightClientBootstrapElectra<Spec>, Spec>::electra_only().run();
         SszStaticHandler::<LightClientBootstrapFulu<Spec>, Spec>::fulu_only().run();
+        SszStaticHandler::<LightClientBootstrapGloas<Spec>, Spec>::gloas_only().run();
     }
 
     // LightClientHeader has no internal indicator of which fork it is for, so we test it separately.
@@ -381,6 +392,7 @@ mod ssz_static {
         SszStaticHandler::<LightClientHeaderDeneb<Spec>, Spec>::deneb_only().run();
         SszStaticHandler::<LightClientHeaderElectra<Spec>, Spec>::electra_only().run();
         SszStaticHandler::<LightClientHeaderFulu<Spec>, Spec>::fulu_only().run();
+        SszStaticHandler::<LightClientHeaderGloas<Spec>, Spec>::gloas_only().run();
     }
 
     // LightClientOptimisticUpdate has no internal indicator of which fork it is for, so we test it separately.
@@ -392,6 +404,7 @@ mod ssz_static {
         SszStaticHandler::<LightClientOptimisticUpdateDeneb<Spec>, Spec>::deneb_only().run();
         SszStaticHandler::<LightClientOptimisticUpdateElectra<Spec>, Spec>::electra_only().run();
         SszStaticHandler::<LightClientOptimisticUpdateFulu<Spec>, Spec>::fulu_only().run();
+        SszStaticHandler::<LightClientOptimisticUpdateGloas<Spec>, Spec>::gloas_only().run();
     }
 
     // LightClientFinalityUpdate has no internal indicator of which fork it is for, so we test it separately.
@@ -403,6 +416,7 @@ mod ssz_static {
         SszStaticHandler::<LightClientFinalityUpdateDeneb<Spec>, Spec>::deneb_only().run();
         SszStaticHandler::<LightClientFinalityUpdateElectra<Spec>, Spec>::electra_only().run();
         SszStaticHandler::<LightClientFinalityUpdateFulu<Spec>, Spec>::fulu_only().run();
+        SszStaticHandler::<LightClientFinalityUpdateGloas<Spec>, Spec>::gloas_only().run();
     }
 
     // LightClientUpdate has no internal indicator of which fork it is for, so we test it separately.
@@ -414,6 +428,7 @@ mod ssz_static {
         SszStaticHandler::<LightClientUpdateDeneb<Spec>, Spec>::deneb_only().run();
         SszStaticHandler::<LightClientUpdateElectra<Spec>, Spec>::electra_only().run();
         SszStaticHandler::<LightClientUpdateFulu<Spec>, Spec>::fulu_only().run();
+        SszStaticHandler::<LightClientUpdateGloas<Spec>, Spec>::gloas_only().run();
     }
 
     #[test]
@@ -678,6 +693,11 @@ fn epoch_processing_slashings_reset() {
 }
 
 #[test]
+fn epoch_processing_pending_randao_commitments() {
+    EpochProcessingHandler::<Spec, PendingRandaoCommitments>::default().run();
+}
+
+#[test]
 fn epoch_processing_randao_mixes_reset() {
     EpochProcessingHandler::<Spec, RandaoMixesReset>::default().run();
 }
@@ -850,6 +870,13 @@ fn fork_choice_should_apply_proposer_boost() {
 
 #[test]
 #[cfg(feature = "spec-minimal")]
+fn fork_choice_filter_node_tree_variants() {
+    ForkChoiceHandler::<Spec>::new("filter_node_tree_variants").run();
+    // There is no mainnet variant for this test.
+}
+
+#[test]
+#[cfg(feature = "spec-minimal")]
 fn fork_choice_compliance_attester_slashing_test() {
     ForkChoiceComplianceHandler::<Spec>::new("attester_slashing_test").run();
 }
@@ -987,37 +1014,43 @@ fn gossip_randao_commitment_registration() {
     GossipValidationHandler::<Spec>::new("gossip_randao_commitment_registration").run();
 }
 
-#[test]
-fn gossip_data_column_sidecar() {
-    GossipValidationHandler::<Spec>::new("gossip_data_column_sidecar").run();
-}
+// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
+// #[test]
+// fn gossip_data_column_sidecar() {
+//     GossipValidationHandler::<Spec>::new("gossip_data_column_sidecar").run();
+// }
 
-#[test]
-fn gossip_execution_payload_bid() {
-    GossipValidationHandler::<Spec>::new("gossip_execution_payload_bid").run();
-}
+// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
+// #[test]
+// fn gossip_execution_payload_bid() {
+//     GossipValidationHandler::<Spec>::new("gossip_execution_payload_bid").run();
+// }
 
-#[test]
-fn gossip_execution_payload_envelope() {
-    GossipValidationHandler::<Spec>::new("gossip_execution_payload_envelope").run();
-}
+// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
+// #[test]
+// fn gossip_execution_payload_envelope() {
+//     GossipValidationHandler::<Spec>::new("gossip_execution_payload_envelope").run();
+// }
 
 #[test]
 fn gossip_inclusion_list() {
     GossipValidationHandler::<Spec>::new("gossip_inclusion_list").run();
 }
 
-#[test]
-fn gossip_partial_data_column_sidecar() {
-    GossipValidationHandler::<Spec>::new("gossip_partial_data_column_sidecar").run();
-}
+// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
+// #[test]
+// fn gossip_partial_data_column_sidecar() {
+//     GossipValidationHandler::<Spec>::new("gossip_partial_data_column_sidecar").run();
+// }
 
-#[test]
-fn gossip_payload_attestation_message() {
-    GossipValidationHandler::<Spec>::new("gossip_payload_attestation_message").run();
-}
+// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
+// #[test]
+// fn gossip_payload_attestation_message() {
+//     GossipValidationHandler::<Spec>::new("gossip_payload_attestation_message").run();
+// }
 
-#[test]
-fn gossip_proposer_preferences() {
-    GossipValidationHandler::<Spec>::new("gossip_proposer_preferences").run();
-}
+// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
+// #[test]
+// fn gossip_proposer_preferences() {
+//     GossipValidationHandler::<Spec>::new("gossip_proposer_preferences").run();
+// }

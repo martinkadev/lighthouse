@@ -3,6 +3,7 @@ use crate::beacon_chain::ForkChoiceError;
 use crate::beacon_fork_choice_store::Error as ForkChoiceStoreError;
 use crate::data_availability_checker::AvailabilityCheckError;
 use crate::inclusion_list_store::Error as InclusionListStoreError;
+use crate::inclusion_list_verification::InclusionListTransactionsError;
 use crate::migrate::PruningError;
 use crate::naive_aggregation_pool::Error as NaiveAggregationError;
 use crate::observed_aggregates::Error as ObservedAttestationsError;
@@ -114,6 +115,14 @@ pub enum BeaconChainError {
         shuffling_epoch: Epoch,
         head_block_epoch: Epoch,
     },
+    MissingShufflingDependentRoot {
+        block_root: Hash256,
+        epoch: Epoch,
+    },
+    InclusionListDependentRootMismatch {
+        dependent_root: Hash256,
+        shuffling_decision_root: Hash256,
+    },
     WeakSubjectivtyVerificationFailure,
     WeakSubjectivtyShutdownError(TrySendError<ShutdownReason>),
     AttestingToFinalizedSlot {
@@ -155,6 +164,8 @@ pub enum BeaconChainError {
     BlockVariantLacksExecutionPayload(Hash256),
     ExecutionLayerErrorPayloadReconstruction(ExecutionBlockHash, Box<execution_layer::Error>),
     ExecutionLayerGetBlockByNumberFailed(Box<execution_layer::Error>),
+    ExecutionLayerGetInclusionListFailed(Box<execution_layer::Error>),
+    InvalidInclusionListFromExecutionLayer(InclusionListTransactionsError),
     BlockHashMissingFromExecutionLayer(ExecutionBlockHash),
     InconsistentPayloadReconstructed {
         slot: Slot,
@@ -179,6 +190,7 @@ pub enum BeaconChainError {
     HeadMissingFromForkChoice(Hash256),
     FinalizedBlockMissingFromForkChoice(Hash256),
     HeadBlockMissingFromForkChoice(Hash256),
+    PreMergeBlockHasNoExecutionHash(Hash256),
     InvalidFinalizedPayload {
         finalized_root: Hash256,
         execution_block_hash: PayloadBlockHash,
@@ -344,6 +356,12 @@ pub enum BlockProductionError {
     GloasNotImplemented(String),
     // TODO(heze): Remove this once Heze is implemented
     HezeNotImplemented(String),
+    /// EIP-8321: the proposer has registered a hash-chain commitment, but the validator client
+    /// did not supply a `hash_chain_reveal` for this block.
+    HashChainRandaoUnsupported,
+    /// EIP-8321: the proposer has no registered hash-chain commitment, but a
+    /// `hash_chain_reveal` was supplied for this block.
+    HashChainRandaoUnexpected,
 }
 
 easy_from_to!(BlockProcessingError, BlockProductionError);

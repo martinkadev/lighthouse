@@ -508,7 +508,9 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
                         verify_columns_against_block(&self.kzg, available_block.block(), columns)?;
                     }
                 },
-                RangeSyncBlock::Gloas { block, envelope } => {
+                RangeSyncBlock::Gloas {
+                    block, envelope, ..
+                } => {
                     if let Some(envelope) = envelope {
                         verify_columns_against_block(&self.kzg, block, &envelope.columns)?;
                     }
@@ -653,8 +655,11 @@ pub fn verify_columns_against_block<E: EthSpec>(
                     "Gloas block missing signed_execution_payload_bid".to_string(),
                 )
             })?;
-        validate_data_columns_with_commitments(kzg, columns.iter(), &commitments)
-            .map_err(AvailabilityCheckError::InvalidColumn)
+        validate_data_columns_with_commitments(
+            kzg,
+            columns.iter().map(|c| (c, commitments.as_slice())),
+        )
+        .map_err(AvailabilityCheckError::InvalidColumn)
     } else {
         verify_kzg_for_data_column_list(columns.iter(), kzg)
             .map_err(AvailabilityCheckError::InvalidColumn)
@@ -691,16 +696,16 @@ async fn availability_cache_maintenance_service<T: BeaconChainTypes>(
     overflow_cache: Arc<DataAvailabilityCheckerInner<T>>,
     partial_assembler: Option<Arc<PartialDataColumnAssembler<T::EthSpec>>>,
 ) {
-    let epoch_duration = chain.slot_clock.slot_duration() * T::EthSpec::slots_per_epoch() as u32;
+    let slots_per_epoch = T::EthSpec::slots_per_epoch();
     loop {
-        match chain
-            .slot_clock
-            .duration_to_next_epoch(T::EthSpec::slots_per_epoch())
-        {
+        // this service runs 3/4 of the way through each epoch
+        let maintenance_slot = chain.slot_clock.now_or_genesis().map(|current_slot| {
+            let next_epoch = current_slot.epoch(slots_per_epoch) + 1;
+            next_epoch.start_slot(slots_per_epoch) + slots_per_epoch * 3 / 4
+        });
+        match maintenance_slot.and_then(|slot| chain.slot_clock.duration_to_slot(slot)) {
             Some(duration) => {
-                // this service should run 3/4 of the way through the epoch
-                let additional_delay = (epoch_duration * 3) / 4;
-                tokio::time::sleep(duration + additional_delay).await;
+                tokio::time::sleep(duration).await;
 
                 let Some(deneb_fork_epoch) = chain.spec.deneb_fork_epoch else {
                     // shutdown service if deneb fork epoch not set
@@ -729,7 +734,7 @@ async fn availability_cache_maintenance_service<T: BeaconChainTypes>(
 
                 let Some(min_epochs_for_blobs) = chain
                     .spec
-                    .min_epoch_data_availability_boundary(current_epoch)
+                    .min_epoch_data_availability_boundary::<T::EthSpec>(current_epoch)
                 else {
                     // Shutdown service if deneb fork epoch not set. Unreachable as the same check is performed above.
                     break;
@@ -748,7 +753,7 @@ async fn availability_cache_maintenance_service<T: BeaconChainTypes>(
             None => {
                 error!("Failed to read slot clock");
                 // If we can't read the slot clock, just wait another slot.
-                tokio::time::sleep(chain.slot_clock.slot_duration()).await;
+                tokio::time::sleep(chain.slot_clock.current_slot_duration()).await;
             }
         };
     }
@@ -842,12 +847,14 @@ impl<E: EthSpec> AvailableBlock<E> {
     /// - Required custody columns are complete based on the node's custody requirements
     /// - KZG commitments in blobs match those in the block
     ///
+    /// Caller must ensure that `block_root == block.canonical_root()`.
     /// Returns `AvailabilityCheckError` if:
     /// - `InvalidAvailableBlockData`: Block data is provided but not required
     /// - `MissingBlobs`: Block requires blobs but they are missing or incomplete
     /// - `MissingCustodyColumns`: Block requires custody columns but they are incomplete
     /// - `KzgCommitmentMismatch`: Blob KZG commitment doesn't match block commitment
     pub fn new<T>(
+        block_root: Hash256,
         block: Arc<SignedBeaconBlock<T::EthSpec>>,
         block_data: AvailableBlockData<T::EthSpec>,
         custody_context: &CustodyContext<T>,
@@ -914,17 +921,21 @@ impl<E: EthSpec> AvailableBlock<E> {
         }
 
         Ok(Self {
-            block_root: block.canonical_root(),
+            block_root,
             block,
             blob_data: block_data,
             blobs_available_timestamp: None,
         })
     }
 
-    pub fn new_gloas(block: Arc<SignedBeaconBlock<E>>) -> Result<Self, String> {
+    /// Caller must ensure that `block_root == block.canonical_root()`.
+    pub fn new_gloas(
+        block_root: Hash256,
+        block: Arc<SignedBeaconBlock<E>>,
+    ) -> Result<Self, String> {
         if block.fork_name_unchecked().gloas_enabled() {
             Ok(Self {
-                block_root: block.canonical_root(),
+                block_root,
                 block,
                 blob_data: AvailableBlockData::NoData,
                 blobs_available_timestamp: None,
@@ -1243,8 +1254,14 @@ mod test {
                 };
 
                 let block_data = AvailableBlockData::new_with_data_columns(custody_columns);
-                RangeSyncBlock::new(Arc::new(block), block_data, da_checker.custody_context())
-                    .expect("should create RPC block with custody columns")
+                let block_root = block.canonical_root();
+                RangeSyncBlock::new(
+                    block_root,
+                    Arc::new(block),
+                    block_data,
+                    da_checker.custody_context(),
+                )
+                .expect("should create RPC block with custody columns")
             })
             .collect::<Vec<_>>();
 
@@ -1345,11 +1362,7 @@ mod test {
     }
 
     fn new_da_checker(spec: Arc<ChainSpec>) -> DataAvailabilityChecker<T> {
-        let slot_clock = TestingSlotClock::new(
-            Slot::new(0),
-            Duration::from_secs(0),
-            spec.get_slot_duration(),
-        );
+        let slot_clock = TestingSlotClock::from_spec::<E>(Duration::from_secs(0), &spec);
         let kzg = get_kzg(&spec);
         let ordered_custody_column_indices = generate_data_column_indices_rand_order::<E>();
         let complete_blob_backfill = false;

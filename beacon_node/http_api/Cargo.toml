@@ -45,6 +45,7 @@ sensitive_url = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 slot_clock = { workspace = true }
+ssz_types = { workspace = true }
 state_processing = { workspace = true }
 store = { workspace = true }
 sysinfo = { workspace = true }
@@ -63,6 +64,7 @@ warp_utils = { workspace = true }
 fork_choice = { workspace = true }
 genesis = { workspace = true }
 proto_array = { workspace = true }
+ssz_types = { workspace = true }
 
 [[test]]
 name = "bn_http_api_tests"

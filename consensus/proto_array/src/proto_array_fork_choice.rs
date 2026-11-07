@@ -52,6 +52,11 @@ impl VoteTracker {
     pub fn current_slot(&self) -> Slot {
         self.current_slot
     }
+
+    /// The payload status of this validator's latest message for a block at `block_slot`.
+    pub fn current_payload_status(&self, block_slot: Slot) -> PayloadStatus {
+        PayloadStatus::from_vote(self.current_slot, self.current_payload_present, block_slot)
+    }
 }
 
 // This impl is only used upon upgrade from pre-Gloas to Gloas with all pre-Gloas nodes.
@@ -572,11 +577,6 @@ impl std::fmt::Display for DoNotReOrg {
     }
 }
 
-/// New-type for the re-org threshold percentage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ReOrgThreshold(pub u64);
-
 #[derive(PartialEq)]
 pub struct ProtoArrayForkChoice {
     pub(crate) proto_array: ProtoArray,
@@ -653,9 +653,10 @@ impl ProtoArrayForkChoice {
         &mut self,
         block_root: Hash256,
         execution_status: ExecutionStatus,
+        inclusion_list_satisfied: bool,
     ) -> Result<(), String> {
         self.proto_array
-            .on_payload_envelope_received(block_root, execution_status)
+            .on_payload_envelope_received(block_root, execution_status, inclusion_list_satisfied)
             .map_err(|e| format!("Failed to process execution payload: {:?}", e))
     }
 
@@ -708,7 +709,7 @@ impl ProtoArrayForkChoice {
         Ok(())
     }
 
-    /// Process a PTC vote by setting the appropriate bits on the target block's V29 node.
+    /// Process a PTC vote by setting the appropriate bits on the target block's V33 node.
     ///
     /// `ptc_index` is the voter's position in the PTC committee (resolved by the caller).
     /// This writes directly to the node's bitfields, bypassing the delta pipeline.
@@ -730,19 +731,19 @@ impl ProtoArrayForkChoice {
         let node = self.proto_array.nodes.get_mut(node_index).ok_or_else(|| {
             format!("process_payload_attestation: invalid node index {node_index}")
         })?;
-        let v29 = node
-            .as_v29_mut()
-            .map_err(|_| format!("process_payload_attestation: node {block_root:?} is not V29"))?;
+        let v33 = node
+            .as_v33_mut()
+            .map_err(|_| format!("process_payload_attestation: node {block_root:?} is not V33"))?;
 
-        v29.payload_timeliness_votes
+        v33.payload_timeliness_votes
             .set(ptc_index, payload_present)
             .map_err(|e| format!("process_payload_attestation: timeliness set failed: {e:?}"))?;
-        v29.payload_data_availability_votes
+        v33.payload_data_availability_votes
             .set(ptc_index, blob_data_available)
             .map_err(|e| {
                 format!("process_payload_attestation: data availability set failed: {e:?}")
             })?;
-        v29.ptc_participation
+        v33.ptc_participation
             .set(ptc_index, true)
             .map_err(|e| format!("process_payload_attestation: participation set failed: {e:?}"))?;
 
@@ -820,23 +821,18 @@ impl ProtoArrayForkChoice {
     /// Get the block to propose on during `current_slot`.
     ///
     /// This function returns a *definitive* result which should be acted on.
-    #[allow(clippy::too_many_arguments)]
     pub fn get_proposer_head<E: EthSpec>(
         &self,
         current_slot: Slot,
         canonical_head: Hash256,
         justified_balances: &JustifiedBalances,
-        re_org_head_threshold: ReOrgThreshold,
-        re_org_parent_threshold: ReOrgThreshold,
-        max_epochs_since_finalization: Epoch,
+        spec: &ChainSpec,
     ) -> Result<ProposerHeadInfo, ProposerHeadError<Error>> {
         let info = self.get_proposer_head_info::<E>(
             current_slot,
             canonical_head,
             justified_balances,
-            re_org_head_threshold,
-            re_org_parent_threshold,
-            max_epochs_since_finalization,
+            spec,
         )?;
 
         // Only re-org a single slot. This prevents cascading failures during asynchrony.
@@ -877,15 +873,12 @@ impl ProtoArrayForkChoice {
     /// Get information about the block to propose on during `current_slot`.
     ///
     /// This function returns a *partial* result which must be processed further.
-    #[allow(clippy::too_many_arguments)]
     pub fn get_proposer_head_info<E: EthSpec>(
         &self,
         current_slot: Slot,
         canonical_head: Hash256,
         justified_balances: &JustifiedBalances,
-        re_org_head_threshold: ReOrgThreshold,
-        re_org_parent_threshold: ReOrgThreshold,
-        max_epochs_since_finalization: Epoch,
+        spec: &ChainSpec,
     ) -> Result<ProposerHeadInfo, ProposerHeadError<Error>> {
         let mut nodes = self
             .proto_array
@@ -908,7 +901,7 @@ impl ProtoArrayForkChoice {
             .ok_or(DoNotReOrg::MissingHeadFinalizedCheckpoint)?
             .epoch;
         let epochs_since_finalization = proposal_epoch.saturating_sub(finalized_epoch).as_u64();
-        if epochs_since_finalization > max_epochs_since_finalization.as_u64() {
+        if epochs_since_finalization > spec.reorg_max_epochs_since_finalization {
             return Err(DoNotReOrg::ChainNotFinalizing {
                 epochs_since_finalization,
             }
@@ -934,12 +927,14 @@ impl ProtoArrayForkChoice {
 
         // Compute re-org weight thresholds for head and parent.
         let re_org_head_weight_threshold =
-            calculate_committee_fraction::<E>(justified_balances, re_org_head_threshold.0)
+            calculate_committee_fraction::<E>(justified_balances, spec.reorg_head_weight_threshold)
                 .ok_or(Error::ReOrgThresholdOverflow)?;
 
-        let re_org_parent_weight_threshold =
-            calculate_committee_fraction::<E>(justified_balances, re_org_parent_threshold.0)
-                .ok_or(Error::ReOrgThresholdOverflow)?;
+        let re_org_parent_weight_threshold = calculate_committee_fraction::<E>(
+            justified_balances,
+            spec.reorg_parent_weight_threshold,
+        )
+        .ok_or(Error::ReOrgThresholdOverflow)?;
 
         Ok(ProposerHeadInfo {
             head_node,
@@ -1016,6 +1011,10 @@ impl ProtoArrayForkChoice {
             *node.weight_mut() = 0;
             match node {
                 ProtoNode::V29(node) => {
+                    node.full_payload_weight = 0;
+                    node.empty_payload_weight = 0;
+                }
+                ProtoNode::V33(node) => {
                     node.full_payload_weight = 0;
                     node.empty_payload_weight = 0;
                 }
@@ -1222,6 +1221,26 @@ impl ProtoArrayForkChoice {
     pub fn is_payload_received(&self, block_root: &Hash256) -> bool {
         self.get_proto_node(block_root)
             .and_then(|node| node.payload_received().ok())
+            .unwrap_or(false)
+    }
+
+    /// Returns `true` if more than `PAYLOAD_TIMELY_THRESHOLD` PTC members voted that the payload
+    /// for `block_root` was timely. Ignores whether this node received the payload itself.
+    ///
+    /// Returns `false` for unknown or pre-Gloas blocks.
+    pub fn ptc_votes_payload_timely<E: EthSpec>(&self, block_root: &Hash256) -> bool {
+        self.get_proto_node(block_root)
+            .and_then(|node| node.ptc_votes_timeliness::<E>(true).ok())
+            .unwrap_or(false)
+    }
+
+    /// Returns `true` if more than `DATA_AVAILABILITY_TIMELY_THRESHOLD` PTC members voted that
+    /// the blob data for `block_root` was available. Ignores this node's own availability view.
+    ///
+    /// Returns `false` for unknown or pre-Gloas blocks.
+    pub fn ptc_votes_data_available<E: EthSpec>(&self, block_root: &Hash256) -> bool {
+        self.get_proto_node(block_root)
+            .and_then(|node| node.ptc_votes_data_availability::<E>(true).ok())
             .unwrap_or(false)
     }
 

@@ -5,12 +5,10 @@ use std::sync::Arc;
 use proto_array::PayloadStatus;
 
 use bls::{PublicKeyBytes, Signature};
-use execution_layer::{
-    BlockProposalContentsGloas, BuilderParams, PayloadAttributes, PayloadParameters,
-};
+use execution_layer::{BlockProposalContentsGloas, PayloadAttributes, PayloadParameters};
 use futures::future::OptionFuture;
 use operation_pool::CompactAttestationRef;
-use ssz::{BitVector, Encode, ProgressiveBitList, TryFromIter};
+use ssz::{Encode, ProgressiveBitList, TryFromIter};
 use ssz_types::ProgressiveVariableList;
 use state_processing::common::{get_attesting_indices_from_state, get_indexed_payload_attestation};
 use state_processing::envelope_processing::verify_execution_payload_envelope;
@@ -25,20 +23,21 @@ use state_processing::{
 };
 use state_processing::{VerifyOperation, state_advance::complete_state_advance};
 use task_executor::JoinHandle;
-use tracing::{Instrument, debug, debug_span, error, instrument, trace, warn};
+use tracing::{Instrument, debug, debug_span, error, info, instrument, trace, warn};
 use tree_hash::TreeHash;
 use types::consts::gloas::BUILDER_INDEX_SELF_BUILD;
 use types::{
     Address, Attestation, AttestationGloas, AttesterSlashing, AttesterSlashingGloas, BeaconBlock,
-    BeaconBlockBodyGloas, BeaconBlockBodyHeze, BeaconBlockGloas, BeaconBlockHeze, BeaconState,
-    BeaconStateError, BlobsList, BuilderIndex, Deposit, Eth1Data, EthSpec, ExecutionBlockHash,
-    ExecutionPayloadBidGloas, ExecutionPayloadBidHeze, ExecutionPayloadEnvelope,
-    ExecutionRequestsGloas, FullPayload, Graffiti, Hash256, IndexedAttestation, KzgProofs,
-    PayloadAttestation, ProgressiveTransactions, ProposerSlashing, RelativeEpoch,
-    SignedBeaconBlock, SignedBlsToExecutionChange, SignedExecutionPayloadBid,
-    SignedExecutionPayloadBidGloas, SignedExecutionPayloadBidHeze, SignedExecutionPayloadEnvelope,
-    SignedExecutionPayloadEnvelopeSummary, SignedProposerPreferences, SignedVoluntaryExit, Slot,
-    SyncAggregate, Uint256, Withdrawal, Withdrawals,
+    BeaconBlockBodyEip8321, BeaconBlockBodyGloas, BeaconBlockBodyHeze, BeaconBlockEip8321,
+    BeaconBlockGloas, BeaconBlockHeze, BeaconState, BeaconStateError, BlobsList, BuilderIndex,
+    Deposit, Eth1Data, EthSpec, ExecutionBlockHash, ExecutionPayloadBidGloas,
+    ExecutionPayloadBidHeze, ExecutionPayloadEnvelope, ExecutionRequestsGloas, FullPayload,
+    Graffiti, Hash256, InclusionListBits, IndexedAttestation, KzgProofs, PayloadAttestation,
+    ProposerSlashing, RelativeEpoch, SignedBeaconBlock, SignedBlsToExecutionChange,
+    SignedExecutionPayloadBid, SignedExecutionPayloadBidGloas, SignedExecutionPayloadBidHeze,
+    SignedExecutionPayloadEnvelope, SignedExecutionPayloadEnvelopeSummary,
+    SignedProposerPreferences, SignedVoluntaryExit, Slot, SyncAggregate, Uint256, Withdrawal,
+    Withdrawals,
 };
 
 use builder_client::BidRequestContext;
@@ -49,7 +48,7 @@ use crate::block_production::bid_selection::{self, BidCandidate, BidSource, Exec
 use crate::payload_bid_verification::PayloadBidError;
 use crate::payload_bid_verification::direct_verified_bid::verify_direct_bid;
 use crate::payload_bid_verification::gossip_verified_bid::{
-    builder_exit_requested, verify_bid_state_conditions,
+    builder_exit_requested, verify_bid_inclusion_list_bits, verify_bid_state_conditions,
 };
 use crate::payload_bid_verification::payload_bid_cache::BidParent;
 use crate::pending_payload_envelopes::PendingEnvelopeData;
@@ -93,7 +92,10 @@ pub struct PartialBeaconBlock<E: EthSpec> {
     proposer_index: u64,
     parent_root: Hash256,
     randao_reveal: Signature,
-    eth1_data: Eth1Data,
+    /// EIP-8321: the hash-chain preimage for a proposer with a registered commitment,
+    /// `Hash256::ZERO` for validators using the legacy BLS reveal.
+    hash_chain_reveal: Hash256,
+    eth1_data: Option<Eth1Data>,
     graffiti: Graffiti,
     proposer_slashings: Vec<ProposerSlashing>,
     attester_slashings: Vec<AttesterSlashingGloas<E>>,
@@ -126,6 +128,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         graffiti_settings: GraffitiSettings,
         verification: ProduceBlockVerification,
         builder_config: BuilderConfig,
+        hash_chain_reveal: Option<Hash256>,
     ) -> Result<BlockProductionResult<T::EthSpec>, BlockProductionError> {
         metrics::inc_counter(&metrics::BLOCK_PRODUCTION_REQUESTS);
         let _complete_timer = metrics::start_timer(&metrics::BLOCK_PRODUCTION_TIMES);
@@ -164,6 +167,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             graffiti_settings,
             verification,
             builder_config,
+            hash_chain_reveal,
         )
         .await
     }
@@ -182,6 +186,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         graffiti_settings: GraffitiSettings,
         verification: ProduceBlockVerification,
         builder_config: BuilderConfig,
+        hash_chain_reveal: Option<Hash256>,
     ) -> Result<BlockProductionResult<T::EthSpec>, BlockProductionError> {
         debug!(
             slot = %produce_at_slot,
@@ -229,6 +234,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         graffiti,
                         &parent_execution_requests_ref,
                         should_build_on_full,
+                        hash_chain_reveal,
                     )
                 },
                 "produce_partial_beacon_block_gloas",
@@ -283,6 +289,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .gossip_verified_proposer_preferences_cache
             .get_preferences(&produce_at_slot, dependent_root);
 
+        // The node's own inclusion list bits for the slot before the proposal.
+        // This contains every stored list, both timely and untimely.
+        // The self-bid claims them and every external bid must cover them.
+        let local_inclusion_list_bits = self.local_inclusion_list_bits(&ctx).await;
+
         // Fire the direct builder fan-out concurrently with the local EL payload build: both only
         // read `state`, so they race without contention. A local EL failure is not fatal — we fall
         // back to an external bid when one is available; only a total absence of viable bids fails
@@ -291,6 +302,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             ctx,
             &builder_config,
             proposer_preferences.as_deref(),
+            &local_inclusion_list_bits,
             &state,
             &parent_execution_requests,
         );
@@ -306,6 +318,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     BUILDER_INDEX_SELF_BUILD,
                     executed_ancestor_hash,
                     proposer_preferences.as_deref(),
+                    &local_inclusion_list_bits,
                 )
             })
             .into();
@@ -327,11 +340,20 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 ));
             }
             Some(Err(e)) => {
-                error!(
-                    error = ?e,
-                    slot = %produce_at_slot,
-                    "Local execution payload build failed; falling back to an external bid"
-                );
+                if candidates.is_empty() {
+                    error!(
+                        error = ?e,
+                        slot = %produce_at_slot,
+                        "Local execution payload build failed and no external bids are available; \
+                         block production will fail"
+                    );
+                } else {
+                    error!(
+                        error = ?e,
+                        slot = %produce_at_slot,
+                        "Local execution payload build failed; falling back to an external bid"
+                    );
+                }
             }
         }
 
@@ -373,6 +395,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         graffiti: Graffiti,
         parent_execution_requests: &ExecutionRequestsGloas<T::EthSpec>,
         should_build_on_full: bool,
+        hash_chain_reveal: Option<Hash256>,
     ) -> Result<(PartialBeaconBlock<T::EthSpec>, BeaconState<T::EthSpec>), BlockProductionError>
     {
         // It is invalid to try to produce a block using a state from a future slot.
@@ -401,6 +424,31 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         let proposer_index = state.get_beacon_proposer_index(state.slot(), &self.spec)? as u64;
 
+        // EIP-8321: a validator with a registered commitment reveals a hash-chain preimage
+        // instead of a BLS signature, and the legacy BLS reveal must be the G2 point at infinity.
+        // The preimage is supplied by the validator client, so refuse to build an invalid block
+        // rather than silently falling back to the legacy reveal. Validators without a commitment
+        // must keep the legacy BLS reveal and leave the hash-chain field empty.
+        let commitment = state
+            .randao_commitments()
+            .ok()
+            .and_then(|commitments| commitments.get(proposer_index as usize).copied())
+            .unwrap_or(types::consts::heze::UNSET_RANDAO_COMMITMENT);
+        let (randao_reveal, hash_chain_reveal) =
+            if commitment != types::consts::heze::UNSET_RANDAO_COMMITMENT {
+                let reveal =
+                    hash_chain_reveal.ok_or(BlockProductionError::HashChainRandaoUnsupported)?;
+                (
+                    Signature::infinity().map_err(BlockProductionError::BlsError)?,
+                    reveal,
+                )
+            } else {
+                if hash_chain_reveal.is_some() {
+                    return Err(BlockProductionError::HashChainRandaoUnexpected);
+                }
+                (randao_reveal, Hash256::ZERO)
+            };
+
         let slashings_and_exits_span = debug_span!("get_slashings_and_exits").entered();
         let (mut proposer_slashings, mut attester_slashings, mut voluntary_exits) =
             self.op_pool.get_slashings_and_exits(&state, &self.spec);
@@ -413,7 +461,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         drop(slashings_and_exits_span);
 
-        let eth1_data = state.eth1_data().clone();
+        let eth1_data = state.eth1_data().ok().cloned();
 
         let deposits = vec![];
 
@@ -487,10 +535,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 .map_err(BlockProductionError::OpPoolError)?
         };
 
-        let mut payload_attestations = self
-            .op_pool
-            .get_payload_attestations(&state, parent_root, &self.spec)
-            .map_err(BlockProductionError::OpPoolError)?;
+        let mut payload_attestations = self.op_pool.get_payload_attestations(&state, parent_root);
 
         // If paranoid mode is enabled re-check the signatures of every included message.
         // This will be a lot slower but guards against bugs in block production and can be
@@ -653,6 +698,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 proposer_index,
                 parent_root,
                 randao_reveal,
+                hash_chain_reveal,
                 eth1_data,
                 graffiti,
                 proposer_slashings,
@@ -707,6 +753,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             proposer_index,
             parent_root,
             randao_reveal,
+            hash_chain_reveal,
             eth1_data,
             graffiti,
             proposer_slashings,
@@ -732,6 +779,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 ));
             }
             BeaconState::Gloas(_) => {
+                let eth1_data = eth1_data.ok_or_else(|| {
+                    BlockProductionError::InvalidBlockVariant(
+                        "Gloas block production requires Eth1 data".to_string(),
+                    )
+                })?;
                 let SignedExecutionPayloadBid::Gloas(signed_execution_payload_bid) =
                     signed_execution_payload_bid
                 else {
@@ -797,7 +849,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     state_root: Hash256::ZERO,
                     body: BeaconBlockBodyHeze {
                         randao_reveal,
-                        eth1_data,
                         graffiti,
                         // The operation list lengths are bounded by the op pool packing limits above.
                         proposer_slashings: ProgressiveVariableList::try_from_iter(
@@ -810,7 +861,51 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         .map_err(BlockProductionError::SszTypesError)?,
                         attestations: ProgressiveVariableList::try_from_iter(attestations)
                             .map_err(BlockProductionError::SszTypesError)?,
-                        deposits: ProgressiveVariableList::try_from_iter(deposits)
+                        voluntary_exits: ProgressiveVariableList::try_from_iter(voluntary_exits)
+                            .map_err(BlockProductionError::SszTypesError)?,
+                        sync_aggregate,
+                        bls_to_execution_changes: ProgressiveVariableList::try_from_iter(
+                            bls_to_execution_changes,
+                        )
+                        .map_err(BlockProductionError::SszTypesError)?,
+                        parent_execution_requests,
+                        signed_execution_payload_bid,
+                        payload_attestations: ProgressiveVariableList::try_from_iter(
+                            payload_attestations,
+                        )
+                        .map_err(BlockProductionError::SszTypesError)?,
+                        _phantom: PhantomData::<FullPayload<T::EthSpec>>,
+                    },
+                })
+            }
+            BeaconState::Eip8321(_) => {
+                let SignedExecutionPayloadBid::Heze(signed_execution_payload_bid) =
+                    signed_execution_payload_bid
+                else {
+                    return Err(BlockProductionError::InvalidBlockVariant(
+                        "Cannot construct an EIP8321 block with a non-Heze execution payload bid"
+                            .to_string(),
+                    ));
+                };
+
+                BeaconBlock::Eip8321(BeaconBlockEip8321 {
+                    slot,
+                    proposer_index,
+                    parent_root,
+                    state_root: Hash256::ZERO,
+                    body: BeaconBlockBodyEip8321 {
+                        randao_reveal,
+                        graffiti,
+                        // The operation list lengths are bounded by the op pool packing limits above.
+                        proposer_slashings: ProgressiveVariableList::try_from_iter(
+                            proposer_slashings,
+                        )
+                        .map_err(BlockProductionError::SszTypesError)?,
+                        attester_slashings: ProgressiveVariableList::try_from_iter(
+                            attester_slashings,
+                        )
+                        .map_err(BlockProductionError::SszTypesError)?,
+                        attestations: ProgressiveVariableList::try_from_iter(attestations)
                             .map_err(BlockProductionError::SszTypesError)?,
                         voluntary_exits: ProgressiveVariableList::try_from_iter(voluntary_exits)
                             .map_err(BlockProductionError::SszTypesError)?,
@@ -823,6 +918,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         signed_execution_payload_bid,
                         payload_attestations: ProgressiveVariableList::try_from_iter(
                             payload_attestations,
+                        )
+                        .map_err(BlockProductionError::SszTypesError)?,
+                        hash_chain_reveal,
+                        randao_commitment_registrations: ProgressiveVariableList::try_from_iter(
+                            self.op_pool.get_randao_commitment_registrations(&state),
                         )
                         .map_err(BlockProductionError::SszTypesError)?,
                         _phantom: PhantomData::<FullPayload<T::EthSpec>>,
@@ -969,6 +1069,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         builder_index: BuilderIndex,
         executed_ancestor_hash: ExecutionBlockHash,
         proposer_preferences: Option<&SignedProposerPreferences>,
+        inclusion_list_bits: &InclusionListBits<T::EthSpec>,
     ) -> Result<
         (
             SignedExecutionPayloadBid<T::EthSpec>,
@@ -991,22 +1092,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         let proposer_index = state.get_beacon_proposer_index(state.slot(), &self.spec)? as u64;
 
-        let pubkey = state
-            .validators()
-            .get(proposer_index as usize)
-            .map(|v| v.pubkey)
-            .ok_or(BlockProductionError::BeaconChain(Box::new(
-                BeaconChainError::ValidatorIndexUnknown(proposer_index as usize),
-            )))?;
-
-        let builder_params = BuilderParams {
-            pubkey,
-            slot: state.slot(),
-            chain_health: self
-                .is_healthy(&parent_root)
-                .map_err(|e| BlockProductionError::BeaconChain(Box::new(e)))?,
-        };
-
         let preferred_gas_limit =
             proposer_preferences.map(|preferences| preferences.message.target_gas_limit);
 
@@ -1017,7 +1102,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             executed_ancestor_hash,
             parent_envelope,
             proposer_index,
-            builder_params,
+            state.slot(),
             preferred_gas_limit,
         )?;
 
@@ -1069,7 +1154,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     signature,
                 })
             }
-            BeaconState::Heze(_) => {
+            BeaconState::Heze(_) | BeaconState::Eip8321(_) => {
                 let bid = ExecutionPayloadBidHeze::<T::EthSpec> {
                     parent_block_hash: executed_ancestor_hash,
                     parent_block_root: parent_root,
@@ -1083,9 +1168,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     execution_payment: EXECUTION_PAYMENT_TRUSTLESS_BUILD,
                     blob_kzg_commitments,
                     execution_requests_root: execution_requests.tree_hash_root(),
-                    // TODO(heze): set the bits based on the IL committee members whose
-                    // inclusion lists were considered when building the payload
-                    inclusion_list_bits: BitVector::new(),
+                    inclusion_list_bits: inclusion_list_bits.clone(),
                 };
                 SignedExecutionPayloadBid::Heze(SignedExecutionPayloadBidHeze {
                     message: bid,
@@ -1123,21 +1206,64 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     ///
     /// Direct bids are requested only when there are configured builders to contact and the proposer
     /// submitted preferences to validate against (`proposer_preferences`, needed for a direct bid's
-    /// gas limit and fee recipient). Acquisition is best-effort: any direct failure — including a
-    /// missing builder service — is logged and skipped, never aborting block production, which can
-    /// still proceed on the local build and gossip bids.
+    /// gas limit and fee recipient). From Heze, every external bid's `inclusion_list_bits` must
+    /// also cover `local_inclusion_list_bits`, the node's own view of the previous slot's inclusion
+    /// lists. Acquisition is best-effort: any direct failure — including a missing builder service
+    /// — is logged and skipped, never aborting block production, which can still proceed on the
+    /// local build and gossip bids.
     async fn acquire_external_bid_candidates(
         self: &Arc<Self>,
         ctx: BidRequestContext,
         builder_config: &BuilderConfig,
         proposer_preferences: Option<&SignedProposerPreferences>,
+        local_inclusion_list_bits: &InclusionListBits<T::EthSpec>,
         state: &BeaconState<T::EthSpec>,
         parent_execution_requests: &ExecutionRequestsGloas<T::EthSpec>,
     ) -> Vec<BidCandidate<T::EthSpec>> {
+        // Post-Gloas circuit breaker: if too many recent payloads never landed on this chain,
+        // prefer the local build. External bids are still collected but compete demoted below the
+        // local build, so a failed local build can fall back to one instead of missing the slot.
+        //
+        // The parent's attestations are not on chain yet, so fork choice says whether it reached
+        // the builder payment quorum. The breaker only applies this to a parent in the previous
+        // slot.
+        let parent_reached_quorum = !self.circuit_breaker.disable_checks()
+            && self.fork_choice_weight_reaches_builder_payment_quorum(&ctx.parent_root);
+        let breaker_tripped = match self.circuit_breaker.evaluate_skips_for_state(
+            state,
+            ctx.slot,
+            parent_reached_quorum,
+            &self.spec,
+        ) {
+            Ok(Some(condition)) => {
+                metrics::inc_counter_vec(
+                    &metrics::BUILDER_CIRCUIT_BREAKER_TRIPS,
+                    &[condition.as_str()],
+                );
+                info!(
+                    info = "this helps protect the network. the --builder-fallback flags can adjust \
+                            the expected health conditions.",
+                    failed_condition = ?condition,
+                    slot = %ctx.slot,
+                    "Chain is unhealthy, preferring the local build over external payload bids"
+                );
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                warn!(
+                    error = ?e,
+                    slot = %ctx.slot,
+                    "Failed to evaluate circuit breaker skip rules; preferring the local build"
+                );
+                true
+            }
+        };
+
         let mut externals = Vec::new();
 
-        // Direct bids: only when there are builders to contact and the proposer submitted preferences
-        // to validate against.
+        // Direct bids: only when there are builders to contact and the proposer submitted
+        // preferences to validate against.
         if !builder_config.builders.is_empty() {
             if let Some(proposer_preferences) = proposer_preferences {
                 externals.extend(
@@ -1145,6 +1271,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         &ctx,
                         builder_config,
                         proposer_preferences,
+                        local_inclusion_list_bits,
                         state,
                     )
                     .await,
@@ -1156,7 +1283,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     "Builders are configured but no proposer preferences are available; skipping \
                      direct builder bids for this proposal"
                 );
+                self.close_builder_bid_streams(&ctx);
             }
+        } else {
+            self.close_builder_bid_streams(&ctx);
         }
 
         if let Some(gossip_bid) = self.gossip_verified_payload_bid_cache.get_highest_bid(
@@ -1166,11 +1296,19 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 parent_block_root: ctx.parent_root,
             },
         ) {
-            // The gossip bid was validated against the head state at gossip time; its builder's
-            // eligibility or coverage can go stale before production. Re-check against the production
-            // state and drop it if it would now fail `per_block_processing`, so a stale gossip bid
-            // can't outrank a viable candidate and sink the whole proposal.
-            match verify_bid_state_conditions(gossip_bid.message(), state, &self.spec) {
+            // The gossip bid was validated against the head state at gossip time, with its
+            // inclusion list bits checked only against the timely lists; its builder's eligibility
+            // or coverage can go stale before production, and more inclusion lists can arrive.
+            // Re-check against the production state, drop the bid if it would now fail
+            // `per_block_processing`, and require its bits to cover every inclusion list the node
+            // holds now, so a stale gossip bid can't outrank a viable candidate and sink the whole
+            // proposal.
+            let result = verify_bid_state_conditions(gossip_bid.message(), state, &self.spec)
+                .and_then(|_| {
+                    verify_bid_inclusion_list_bits(gossip_bid.message(), local_inclusion_list_bits)
+                });
+
+            match result {
                 Ok(_) => {
                     externals.push(BidCandidate::gossip(
                         gossip_bid,
@@ -1181,7 +1319,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 Err(error) => {
                     warn!(
                         ?error,
-                        "Skipping gossip bid that no longer passes state validation"
+                        "Skipping gossip bid that fails validation at production"
                     );
                 }
             }
@@ -1200,27 +1338,103 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             true
         });
 
-        // The parent's exit requests apply to the state before this block's bid is processed, so a
-        // bid from a builder the parent payload exits fails `process_execution_payload_bid`.
+        // Drop bids that would fail `process_execution_payload_bid` or that the circuit breaker
+        // refuses. Only external candidates pass through here: the local self-build is pushed by
+        // the caller afterwards and is never filtered.
         externals.retain(|candidate| {
             let builder_index = candidate.signed_bid.message().builder_index();
-            let exit_requested = state
-                .get_builder(builder_index)
-                .is_ok_and(|builder| builder_exit_requested(builder, parent_execution_requests));
+            let Ok(builder) = state.get_builder(builder_index) else {
+                warn!(
+                    builder_index,
+                    "Skipping bid from unknown builder (not in state)"
+                );
+                return false;
+            };
+
+            // The parent's exit requests apply to the state before this block's bid is processed,
+            // so a bid from a builder the parent payload exits fails `process_execution_payload_bid`.
+            let exit_requested = builder_exit_requested(builder, parent_execution_requests);
             if exit_requested {
                 warn!(
                     builder_index,
                     "Skipping bid from a builder the parent payload exits"
                 );
             }
-            !exit_requested
+
+            // A builder banned for a missed reveal on the chain this proposal extends.
+            let banned = self
+                .circuit_breaker
+                .is_banned(&builder.pubkey, state, ctx.slot);
+            if banned {
+                metrics::inc_counter(&metrics::BUILDER_CIRCUIT_BREAKER_FILTERED_BIDS);
+                warn!(
+                    builder_index,
+                    "Skipping bid from a builder banned for a missed payload reveal"
+                );
+            }
+
+            !exit_requested && !banned
         });
+
+        // A tripped circuit breaker demotes what survives below the local build. Builders banned on
+        // this chain were already dropped above, so they can never be the fallback.
+        if breaker_tripped {
+            for candidate in &mut externals {
+                candidate.demote_for_circuit_breaker();
+            }
+        }
 
         externals
     }
 
-    /// Request direct bids from the configured builders and return each valid one as a selection
-    /// candidate.
+    /// Close the proposal's builder bid streams when block production skips direct bids, so they
+    /// do not run to the end of the slot.
+    fn close_builder_bid_streams(&self, ctx: &BidRequestContext) {
+        if let Some(bid_streams) = self.builder_bid_streams() {
+            bid_streams.close_streams(ctx.slot, ctx.proposer_pubkey);
+        }
+    }
+
+    /// The node's own inclusion list bits for the `ctx.slot - 1` slot. Every inclusion list is
+    /// considered, both timely and untimely. The bits are empty before Heze, and empty when the
+    /// view cannot be read.
+    async fn local_inclusion_list_bits(
+        self: &Arc<Self>,
+        ctx: &BidRequestContext,
+    ) -> InclusionListBits<T::EthSpec> {
+        if !ctx.fork_name.heze_enabled() {
+            return Default::default();
+        }
+
+        let chain = self.clone();
+        let parent_root = ctx.parent_root;
+        let payload_slot = ctx.slot;
+        let result = self
+            .spawn_blocking_handle(
+                move || {
+                    let key = chain.inclusion_list_key_for_payload(parent_root, payload_slot)?;
+                    let committee = chain.get_inclusion_list_committee(&key)?;
+                    chain
+                        .inclusion_list_store
+                        .read()
+                        .get_inclusion_list_bits(&committee, &key, false)
+                        .map_err(Into::into)
+                },
+                "local_inclusion_list_bits",
+            )
+            .await;
+
+        match result.and_then(|bits| bits) {
+            Ok(bits) => bits,
+            Err(error) => {
+                warn!(?error, "Unable to read inclusion list bits");
+                Default::default()
+            }
+        }
+    }
+
+    /// Get direct bids from the configured builders, from a bid stream or a request, and return
+    /// each valid one as a selection candidate.
     ///
     /// Best-effort and never fatal: the builder service is constructed whenever the Gloas fork is
     /// scheduled, so in a correctly-built node it is always present on this (Gloas) path — a missing
@@ -1232,6 +1446,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         ctx: &BidRequestContext,
         builder_config: &BuilderConfig,
         proposer_preferences: &SignedProposerPreferences,
+        local_inclusion_list_bits: &InclusionListBits<T::EthSpec>,
         state: &BeaconState<T::EthSpec>,
     ) -> Vec<BidCandidate<T::EthSpec>> {
         let Some(builders) = self.builders.as_ref() else {
@@ -1254,6 +1469,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let state = Arc::new(state.clone());
         let spec = self.spec.clone();
         let proposer_preferences = Arc::new(proposer_preferences.clone());
+        let local_inclusion_list_bits = local_inclusion_list_bits.clone();
         let executor = self.task_executor.clone();
         // The gas limit a direct bid must adjust from is that of the execution payload at the
         // selected parent, which is the right baseline under either a FULL or EMPTY parent view.
@@ -1272,6 +1488,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     let state = state.clone();
                     let spec = spec.clone();
                     let proposer_preferences = proposer_preferences.clone();
+                    let local_inclusion_list_bits = local_inclusion_list_bits.clone();
                     let executor = executor.clone();
                     async move {
                         // The bid's BLS signature check is CPU-bound; run the whole verification on a
@@ -1298,6 +1515,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                                         executed_ancestor_gas_limit,
                                         &expected_builder_pubkeys,
                                         &proposer_preferences,
+                                        &local_inclusion_list_bits,
                                         &state,
                                         &spec,
                                     )
@@ -1345,7 +1563,7 @@ fn get_execution_payload_gloas<T: BeaconChainTypes>(
     parent_block_hash: ExecutionBlockHash,
     parent_envelope: Option<Arc<SignedExecutionPayloadEnvelopeSummary<T::EthSpec>>>,
     proposer_index: u64,
-    builder_params: BuilderParams,
+    slot: Slot,
     preferred_gas_limit: Option<u64>,
 ) -> Result<PreparePayloadHandle<T::EthSpec>, BlockProductionError> {
     // Compute all required values from the `state` now to avoid needing to pass it into a spawned
@@ -1394,7 +1612,7 @@ fn get_execution_payload_gloas<T: BeaconChainTypes>(
                     random,
                     proposer_index,
                     parent_block_hash,
-                    builder_params,
+                    slot,
                     target_gas_limit,
                     withdrawals,
                     parent_beacon_block_root,
@@ -1422,7 +1640,7 @@ async fn prepare_execution_payload<T>(
     random: Hash256,
     proposer_index: u64,
     parent_block_hash: ExecutionBlockHash,
-    builder_params: BuilderParams,
+    slot: Slot,
     target_gas_limit: u64,
     withdrawals: Vec<Withdrawal>,
     parent_beacon_block_root: Hash256,
@@ -1431,7 +1649,7 @@ where
     T: BeaconChainTypes,
 {
     let spec = &chain.spec;
-    let fork = spec.fork_name_at_slot::<T::EthSpec>(builder_params.slot);
+    let fork = spec.fork_name_at_slot::<T::EthSpec>(slot);
     let execution_layer = chain
         .execution_layer
         .as_ref()
@@ -1459,10 +1677,21 @@ where
     let suggested_fee_recipient = execution_layer
         .get_suggested_fee_recipient(proposer_index)
         .await;
-    let slot_number = Some(builder_params.slot.as_u64());
+    let slot_number = Some(slot.as_u64());
     let inclusion_list_transactions = if fork.heze_enabled() {
-        // TODO(heze): populate from the inclusion list store
-        Some(ProgressiveTransactions::empty())
+        let inner_chain = chain.clone();
+        let transactions = chain
+            .spawn_blocking_handle(
+                move || {
+                    inner_chain
+                        .proposer_inclusion_list_transactions(parent_beacon_block_root, slot - 1)
+                },
+                "prepare_execution_payload_inclusion_list_transactions",
+            )
+            .instrument(debug_span!("proposer_inclusion_list_transactions"))
+            .await
+            .map_err(|e| BlockProductionError::BeaconChain(Box::new(e)))?;
+        Some(transactions)
     } else {
         None
     };

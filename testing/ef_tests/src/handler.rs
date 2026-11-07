@@ -50,6 +50,11 @@ pub trait Handler {
             if fork_name == ForkName::Heze {
                 continue;
             }
+            // EIP8321 vectors live under the `eip8321` feature directory rather than a
+            // per-fork directory, so they are run by `run_for_feature` below.
+            if fork_name == ForkName::Eip8321 {
+                continue;
+            }
             if !self.disabled_forks().contains(&fork_name) && self.is_enabled_for_fork(fork_name) {
                 self.run_for_fork(fork_name);
             }
@@ -60,7 +65,11 @@ pub trait Handler {
         // e.g. consensus-spec-tests/tests/general/[feature_name]/[runner_name]
         // e.g. consensus-spec-tests/tests/general/peerdas/ssz_static
         for feature_name in FeatureName::list_all() {
-            if self.is_enabled_for_feature(feature_name) {
+            // Feature vectors are optional (EIP feature directories are not part of published
+            // consensus-spec-tests releases). Skip handlers whose directory is absent.
+            if self.is_enabled_for_feature(feature_name)
+                && self.handler_path(&feature_name.to_string()).is_dir()
+            {
                 self.run_for_feature(feature_name);
             }
         }
@@ -751,14 +760,16 @@ impl<E: EthSpec + TypeName> Handler for ForkChoiceHandler<E> {
 
         // on_attestation, on_execution_payload_envelope, get_parent_payload_status,
         // on_payload_attestation_message, payload_timeliness, payload_data_availability,
-        // and should_apply_proposer_boost tests exist only for Gloas and later.
+        // should_apply_proposer_boost and filter_node_tree_variants tests exist only for Gloas and
+        // later.
         if (self.handler_name == "on_attestation"
             || self.handler_name == "on_execution_payload_envelope"
             || self.handler_name == "get_parent_payload_status"
             || self.handler_name == "on_payload_attestation_message"
             || self.handler_name == "payload_timeliness"
             || self.handler_name == "payload_data_availability"
-            || self.handler_name == "should_apply_proposer_boost")
+            || self.handler_name == "should_apply_proposer_boost"
+            || self.handler_name == "filter_node_tree_variants")
             && !fork_name.gloas_enabled()
         {
             return false;
@@ -901,7 +912,7 @@ impl<E: EthSpec + TypeName> Handler for OptimisticSyncHandler<E> {
 
     fn disabled_forks(&self) -> Vec<ForkName> {
         // TODO(gloas): remove once we have Gloas optimistic sync tests
-        vec![ForkName::Gloas, ForkName::Heze]
+        vec![ForkName::Gloas, ForkName::Heze, ForkName::Eip8321]
     }
 }
 
@@ -1192,7 +1203,7 @@ impl<E: EthSpec> Handler for KZGComputeCellsHandler<E> {
 
     fn disabled_forks(&self) -> Vec<ForkName> {
         // TODO(gloas): remove once we have Gloas KZG tests
-        vec![ForkName::Gloas, ForkName::Heze]
+        vec![ForkName::Gloas, ForkName::Heze, ForkName::Eip8321]
     }
 }
 
@@ -1217,7 +1228,7 @@ impl<E: EthSpec> Handler for KZGComputeCellsAndKZGProofHandler<E> {
 
     fn disabled_forks(&self) -> Vec<ForkName> {
         // TODO(gloas): remove once we have Gloas KZG tests
-        vec![ForkName::Gloas, ForkName::Heze]
+        vec![ForkName::Gloas, ForkName::Heze, ForkName::Eip8321]
     }
 }
 
@@ -1242,7 +1253,7 @@ impl<E: EthSpec> Handler for KZGVerifyCellKZGProofBatchHandler<E> {
 
     fn disabled_forks(&self) -> Vec<ForkName> {
         // TODO(gloas): remove once we have Gloas KZG tests
-        vec![ForkName::Gloas, ForkName::Heze]
+        vec![ForkName::Gloas, ForkName::Heze, ForkName::Eip8321]
     }
 }
 
@@ -1267,7 +1278,7 @@ impl<E: EthSpec> Handler for KZGRecoverCellsAndKZGProofHandler<E> {
 
     fn disabled_forks(&self) -> Vec<ForkName> {
         // TODO(gloas): remove once we have Gloas KZG tests
-        vec![ForkName::Gloas, ForkName::Heze]
+        vec![ForkName::Gloas, ForkName::Heze, ForkName::Eip8321]
     }
 }
 
@@ -1296,7 +1307,7 @@ impl<E: EthSpec + TypeName> Handler for KzgInclusionMerkleProofValidityHandler<E
 
     fn disabled_forks(&self) -> Vec<ForkName> {
         // TODO(gloas): remove once we have Gloas KZG merkle proof tests
-        vec![ForkName::Gloas, ForkName::Heze]
+        vec![ForkName::Gloas, ForkName::Heze, ForkName::Eip8321]
     }
 }
 
@@ -1329,7 +1340,7 @@ impl<E: EthSpec + TypeName> Handler for MerkleProofValidityHandler<E> {
 
     fn disabled_forks(&self) -> Vec<ForkName> {
         // TODO(gloas): remove once we have Heze light client tests
-        vec![ForkName::Heze]
+        vec![ForkName::Heze, ForkName::Eip8321]
     }
 }
 
@@ -1358,8 +1369,7 @@ impl<E: EthSpec + TypeName> Handler for LightClientUpdateHandler<E> {
     }
 
     fn disabled_forks(&self) -> Vec<ForkName> {
-        // TODO(gloas): remove once we have Gloas light client tests
-        vec![ForkName::Gloas, ForkName::Heze]
+        vec![ForkName::Heze, ForkName::Eip8321]
     }
 }
 

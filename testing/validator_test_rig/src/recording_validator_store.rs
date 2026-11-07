@@ -3,11 +3,13 @@ use eth2::types::{RequestAuth, SignedRequestAuth};
 use futures::Stream;
 use std::sync::{Arc, Mutex};
 use types::{
-    Address, Epoch, ExecutionPayloadEnvelope, Graffiti, Hash256, PayloadAttestationData,
-    PayloadAttestationMessage, ProposerPreferences, SelectionProof, SignedAggregateAndProof,
-    SignedContributionAndProof, SignedExecutionPayloadEnvelope, SignedProposerPreferences,
-    SignedValidatorRegistrationData, SingleAttestation, Slot, SyncCommitteeMessage,
-    SyncSelectionProof, SyncSubnetId, ValidatorRegistrationData,
+    Address, Epoch, ExecutionPayloadEnvelope, Graffiti, Hash256, InclusionList,
+    PayloadAttestationData, PayloadAttestationMessage, ProposerPreferences,
+    RandaoCommitmentRegistration, SelectionProof, SignedAggregateAndProof,
+    SignedContributionAndProof, SignedExecutionPayloadEnvelope, SignedInclusionList,
+    SignedProposerPreferences, SignedRandaoCommitmentRegistration, SignedValidatorRegistrationData,
+    SingleAttestation, Slot, SyncCommitteeMessage, SyncSelectionProof, SyncSubnetId,
+    ValidatorRegistrationData,
 };
 use validator_store::{
     AggregateToSign, AttestationToSign, ContributionToSign, DoppelgangerStatus,
@@ -103,6 +105,16 @@ impl<S: ValidatorStore + 'static> ValidatorStore for RecordingValidatorStore<S> 
     ) -> Result<Signature, StoreError<Self::Error>> {
         self.inner
             .randao_reveal(validator_pubkey, signing_epoch)
+            .await
+    }
+
+    async fn sign_randao_commitment_registration(
+        &self,
+        validator_pubkey: PublicKeyBytes,
+        registration: RandaoCommitmentRegistration,
+    ) -> Result<SignedRandaoCommitmentRegistration, StoreError<Self::Error>> {
+        self.inner
+            .sign_randao_commitment_registration(validator_pubkey, registration)
             .await
     }
 
@@ -251,5 +263,15 @@ impl<S: ValidatorStore + 'static> ValidatorStore for RecordingValidatorStore<S> 
         epoch: Epoch,
     ) -> Option<ProposalData> {
         self.inner.proposal_data_at_epoch(pubkey, epoch)
+    }
+
+    async fn sign_inclusion_list(
+        &self,
+        validator_pubkey: PublicKeyBytes,
+        inclusion_list: InclusionList,
+    ) -> Result<SignedInclusionList, StoreError<Self::Error>> {
+        self.inner
+            .sign_inclusion_list(validator_pubkey, inclusion_list)
+            .await
     }
 }

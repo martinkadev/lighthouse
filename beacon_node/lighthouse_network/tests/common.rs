@@ -10,9 +10,9 @@ use std::sync::Weak;
 use tokio::runtime::Runtime;
 use tracing::{Instrument, debug, error, info_span};
 use tracing_subscriber::EnvFilter;
-use types::{ChainSpec, EnrForkId, Epoch, EthSpec, ForkContext, ForkName, Hash256, MinimalEthSpec};
+use types::{ChainSpec, EnrForkId, Epoch, EthSpec, ForkContext, ForkName, Hash256, Spec};
 
-type E = MinimalEthSpec;
+type E = Spec;
 
 use lighthouse_network::identity::secp256k1;
 use lighthouse_network::rpc::config::InboundRateLimiterConfig;
@@ -29,6 +29,7 @@ pub fn spec_with_all_forks_enabled() -> ChainSpec {
     chain_spec.fulu_fork_epoch = Some(Epoch::new(6));
     chain_spec.gloas_fork_epoch = Some(Epoch::new(7));
     chain_spec.heze_fork_epoch = Some(Epoch::new(8));
+    chain_spec.eip8321_fork_epoch = Some(Epoch::new(9));
 
     // check that we have all forks covered
     assert!(chain_spec.fork_epoch(ForkName::latest()).is_some());

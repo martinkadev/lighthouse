@@ -4,12 +4,15 @@ use crate::common::{
     get_attestation_participation_flag_indices, increase_balance, initiate_validator_exit,
     slash_validator,
 };
-use crate::per_block_processing::errors::{BlockProcessingError, ExitInvalid, IntoWithIndex};
+use crate::per_block_processing::errors::{
+    BlockProcessingError, ExitInvalid, IntoWithIndex, RandaoCommitmentRegistrationInvalidReason,
+};
 use crate::per_block_processing::verify_payload_attestation::verify_payload_attestation;
 use ssz_types::FixedVector;
 use typenum::U33;
 use types::consts::altair::{PARTICIPATION_FLAG_WEIGHTS, PROPOSER_WEIGHT, WEIGHT_DENOMINATOR};
 use types::consts::gloas::PAYLOAD_BUILDER_VERSION;
+use types::consts::heze::UNSET_RANDAO_COMMITMENT;
 use types::is_builder_withdrawal_credential;
 
 pub fn process_operations<E: EthSpec, Payload: AbstractExecPayload<E>>(
@@ -47,7 +50,9 @@ pub fn process_operations<E: EthSpec, Payload: AbstractExecPayload<E>>(
         ctxt,
         spec,
     )?;
-    process_deposits(state, &block_body.deposits().to_cow_slice(), spec)?;
+    if !state.fork_name_unchecked().heze_enabled() {
+        process_deposits(state, &block_body.deposits()?.to_cow_slice(), spec)?;
+    }
     process_exits(
         state,
         &block_body.voluntary_exits().to_cow_slice(),
@@ -83,6 +88,112 @@ pub fn process_operations<E: EthSpec, Payload: AbstractExecPayload<E>>(
         )?;
     }
 
+    // [New in EIP8321]
+    if state.fork_name_unchecked().eip8321_enabled()
+        && let Ok(registrations) = block_body.randao_commitment_registrations()
+    {
+        for registration in registrations.iter() {
+            process_randao_commitment_registration(state, registration, verify_signatures, spec)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates a `SignedRandaoCommitmentRegistration` against a state without mutating it.
+///
+/// Shared by block processing and gossip validation.
+///
+/// [New in Eip8321: EIP-8321]
+pub fn verify_randao_commitment_registration<E: EthSpec>(
+    state: &BeaconState<E>,
+    signed_registration: &SignedRandaoCommitmentRegistration,
+    verify_signatures: VerifySignatures,
+    spec: &ChainSpec,
+) -> Result<(), BlockProcessingError> {
+    let registration = &signed_registration.message;
+    let index = registration.validator_index as usize;
+
+    let invalid =
+        |reason| BlockProcessingError::RandaoCommitmentRegistrationInvalid { index, reason };
+
+    block_verify!(
+        index < state.validators().len(),
+        invalid(RandaoCommitmentRegistrationInvalidReason::ValidatorUnknown)
+    );
+    block_verify!(
+        registration.commitment != UNSET_RANDAO_COMMITMENT,
+        invalid(RandaoCommitmentRegistrationInvalidReason::CommitmentUnset)
+    );
+    block_verify!(
+        state
+            .randao_commitments()?
+            .get(index)
+            .copied()
+            .unwrap_or(UNSET_RANDAO_COMMITMENT)
+            == UNSET_RANDAO_COMMITMENT,
+        invalid(RandaoCommitmentRegistrationInvalidReason::CommitmentAlreadySet)
+    );
+    block_verify!(
+        !state
+            .pending_randao_commitments()?
+            .iter()
+            .any(|pending| pending.validator_index == registration.validator_index),
+        invalid(RandaoCommitmentRegistrationInvalidReason::CommitmentAlreadyPending)
+    );
+
+    if verify_signatures.is_true() {
+        let validator = state
+            .validators()
+            .get(index)
+            .ok_or_else(|| invalid(RandaoCommitmentRegistrationInvalidReason::ValidatorUnknown))?;
+        let pubkey = validator
+            .pubkey
+            .decompress()
+            .map_err(|_| invalid(RandaoCommitmentRegistrationInvalidReason::BadSignature))?;
+        // The registration domain is fork-agnostic: `compute_domain` with the genesis fork version.
+        let domain = spec.compute_domain(
+            Domain::RandaoCommitmentRegistration,
+            spec.genesis_fork_version,
+            state.genesis_validators_root(),
+        );
+        let signing_root = SigningData {
+            object_root: registration.tree_hash_root(),
+            domain,
+        }
+        .tree_hash_root();
+        block_verify!(
+            signed_registration.signature.verify(&pubkey, signing_root),
+            invalid(RandaoCommitmentRegistrationInvalidReason::BadSignature)
+        );
+    }
+
+    Ok(())
+}
+
+/// Validates a `SignedRandaoCommitmentRegistration` and queues it for activation.
+///
+/// [New in Eip8321: EIP-8321]
+pub fn process_randao_commitment_registration<E: EthSpec>(
+    state: &mut BeaconState<E>,
+    signed_registration: &SignedRandaoCommitmentRegistration,
+    verify_signatures: VerifySignatures,
+    spec: &ChainSpec,
+) -> Result<(), BlockProcessingError> {
+    verify_randao_commitment_registration(state, signed_registration, verify_signatures, spec)?;
+
+    let registration = &signed_registration.message;
+    let activation_epoch = state
+        .current_epoch()
+        .safe_add(E::commitment_registration_delay())?;
+    state
+        .pending_randao_commitments_mut()?
+        .push(PendingRandaoCommitment {
+            validator_index: registration.validator_index,
+            commitment: registration.commitment,
+            activation_epoch,
+        })?;
+
     Ok(())
 }
 
@@ -92,7 +203,7 @@ pub fn process_operations<E: EthSpec, Payload: AbstractExecPayload<E>>(
 pub fn verify_operation_list_lengths<E: EthSpec, Payload: AbstractExecPayload<E>>(
     block_body: BeaconBlockBodyRef<E, Payload>,
 ) -> Result<(), BlockProcessingError> {
-    let checks: [(&str, usize, usize); 6] = [
+    let checks: [(&str, usize, usize); 7] = [
         (
             "proposer_slashings",
             block_body.proposer_slashings().len(),
@@ -128,6 +239,14 @@ pub fn verify_operation_list_lengths<E: EthSpec, Payload: AbstractExecPayload<E>
                 .map(|atts| atts.len())
                 .unwrap_or(0),
             E::MaxPayloadAttestations::to_usize(),
+        ),
+        (
+            "randao_commitment_registrations",
+            block_body
+                .randao_commitment_registrations()
+                .map(|registrations| registrations.len())
+                .unwrap_or(0),
+            E::MaxRandaoCommitmentRegistrations::to_usize(),
         ),
     ];
 
@@ -276,8 +395,11 @@ pub mod altair_deneb {
 
                     if !validator_participation.has_flag(flag_index)? {
                         validator_participation.add_flag(flag_index)?;
-                        proposer_reward_numerator
-                            .safe_add_assign(state.get_base_reward(index)?.safe_mul(weight)?)?;
+                        proposer_reward_numerator.safe_add_assign(
+                            state
+                                .get_base_reward_for_epoch(index, data.target.epoch)?
+                                .safe_mul(weight)?,
+                        )?;
 
                         update_progressive_balances_on_attestation(
                             state,
@@ -417,8 +539,11 @@ pub mod gloas {
 
                     if !validator_participation.has_flag(flag_index)? {
                         validator_participation.add_flag(flag_index)?;
-                        proposer_reward_numerator
-                            .safe_add_assign(state.get_base_reward(index)?.safe_mul(weight)?)?;
+                        proposer_reward_numerator.safe_add_assign(
+                            state
+                                .get_base_reward_for_epoch(index, data.target.epoch)?
+                                .safe_mul(weight)?,
+                        )?;
                         will_set_new_flag = true;
 
                         update_progressive_balances_on_attestation(
@@ -485,38 +610,6 @@ pub fn process_proposer_slashings<E: EthSpec>(
         .try_for_each(|(i, proposer_slashing)| {
             verify_proposer_slashing(proposer_slashing, state, verify_signatures, spec)
                 .map_err(|e| e.into_with_index(i))?;
-
-            // [New in Gloas:EIP7732]
-            // Remove the BuilderPendingPayment corresponding to this proposal
-            // if it is still in the 2-epoch window. Only clear it when the slashed validator is
-            // the proposer associated with the payment; otherwise an unrelated same-slot
-            // equivocation could grief an honest proposer's payment.
-            if state.fork_name_unchecked().gloas_enabled() {
-                let slot = proposer_slashing.signed_header_1.message.slot;
-                let proposal_epoch = slot.epoch(E::slots_per_epoch());
-                let slot_in_epoch = slot.as_usize().safe_rem(E::SlotsPerEpoch::to_usize())?;
-
-                let payment_index = if proposal_epoch == state.current_epoch() {
-                    Some(E::SlotsPerEpoch::to_usize().safe_add(slot_in_epoch)?)
-                } else if proposal_epoch == state.previous_epoch() {
-                    Some(slot_in_epoch)
-                } else {
-                    None
-                };
-
-                if let Some(index) = payment_index {
-                    let payment = state
-                        .builder_pending_payments_mut()?
-                        .get_mut(index)
-                        .ok_or(BlockProcessingError::BuilderPaymentIndexOutOfBounds(index))?;
-
-                    if payment.proposer_index
-                        == proposer_slashing.signed_header_1.message.proposer_index
-                    {
-                        *payment = BuilderPendingPayment::default();
-                    }
-                }
-            }
 
             slash_validator(
                 state,
@@ -691,13 +784,13 @@ pub fn process_deposits<E: EthSpec>(
     let deposit_requests_start_index = state.deposit_requests_start_index().unwrap_or(u64::MAX);
     let eth1_deposit_index_limit = std::cmp::min(
         deposit_requests_start_index,
-        state.eth1_data().deposit_count,
+        state.eth1_data()?.deposit_count,
     );
 
-    if state.eth1_deposit_index() < eth1_deposit_index_limit {
+    if state.eth1_deposit_index()? < eth1_deposit_index_limit {
         let expected_deposit_len = std::cmp::min(
             E::MaxDeposits::to_u64(),
-            eth1_deposit_index_limit.safe_sub(state.eth1_deposit_index())?,
+            eth1_deposit_index_limit.safe_sub(state.eth1_deposit_index()?)?,
         );
         block_verify!(
             deposits.len() as u64 == expected_deposit_len,
@@ -724,7 +817,7 @@ pub fn process_deposits<E: EthSpec>(
             verify_deposit_merkle_proof(
                 state,
                 deposit,
-                state.eth1_deposit_index().safe_add(i as u64)?,
+                state.eth1_deposit_index()?.safe_add(i as u64)?,
                 spec,
             )
             .map_err(|e| e.into_with_index(i))
@@ -746,18 +839,18 @@ pub fn apply_deposit<E: EthSpec>(
     increment_eth1_deposit_index: bool,
     spec: &ChainSpec,
 ) -> Result<(), BlockProcessingError> {
-    let deposit_index = state.eth1_deposit_index() as usize;
+    let deposit_index = state.eth1_deposit_index()? as usize;
     if let Some(proof) = proof {
         let deposit = Deposit {
             proof,
             data: deposit_data.clone(),
         };
-        verify_deposit_merkle_proof(state, &deposit, state.eth1_deposit_index(), spec)
+        verify_deposit_merkle_proof(state, &deposit, state.eth1_deposit_index()?, spec)
             .map_err(|e| e.into_with_index(deposit_index))?;
     }
 
     if increment_eth1_deposit_index {
-        state.eth1_deposit_index_mut().safe_add_assign(1)?;
+        state.eth1_deposit_index_mut()?.safe_add_assign(1)?;
     }
 
     // Get an `Option<u64>` where `u64` is the validator index if this deposit public key

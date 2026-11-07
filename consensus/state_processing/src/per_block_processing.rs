@@ -1,4 +1,5 @@
 use crate::consensus_context::ConsensusContext;
+use bls::Signature;
 use errors::{
     BlockOperationError, BlockProcessingError, ExecutionPayloadBidInvalid, HeaderInvalid,
 };
@@ -12,7 +13,10 @@ use std::borrow::Cow;
 use tree_hash::TreeHash;
 use typenum::Unsigned;
 use types::{
-    consts::gloas::{BUILDER_INDEX_SELF_BUILD, PAYLOAD_BUILDER_VERSION},
+    consts::{
+        gloas::{BUILDER_INDEX_SELF_BUILD, PAYLOAD_BUILDER_VERSION},
+        heze::{HASH_CHAIN_RANDAO_DST, UNSET_RANDAO_COMMITMENT},
+    },
     *,
 };
 
@@ -24,7 +28,10 @@ pub use altair::sync_committee::process_sync_aggregate;
 pub use block_signature_verifier::{BlockSignatureVerifier, ParallelSignatureSets};
 pub use is_valid_indexed_attestation::is_valid_indexed_attestation;
 pub use is_valid_indexed_payload_attestation::is_valid_indexed_payload_attestation;
-pub use process_operations::process_operations;
+pub use process_operations::{
+    process_operations, process_randao_commitment_registration,
+    verify_randao_commitment_registration,
+};
 pub use verify_attestation::{
     verify_attestation_for_block_inclusion, verify_attestation_for_state,
 };
@@ -210,7 +217,9 @@ pub fn per_block_processing<E: EthSpec, Payload: AbstractExecPayload<E>>(
     }
 
     process_randao(state, block, verify_randao, ctxt, spec)?;
-    process_eth1_data(state, block.body().eth1_data())?;
+    if !state.fork_name_unchecked().heze_enabled() {
+        process_eth1_data(state, block.body().eth1_data()?)?;
+    }
     process_operations(
         state,
         block.body(),
@@ -332,15 +341,35 @@ pub fn process_randao<E: EthSpec, Payload: AbstractExecPayload<E>>(
     ctxt: &mut ConsensusContext<E>,
     spec: &ChainSpec,
 ) -> Result<(), BlockProcessingError> {
+    // EIP8321: validators with a registered hash-chain commitment use the hash-chain
+    // reveal, everyone else keeps the legacy BLS reveal.
+    let proposer_index = ctxt.get_proposer_index(state, spec)? as usize;
+    let commitment = state
+        .randao_commitments()
+        .ok()
+        .and_then(|commitments| commitments.get(proposer_index).copied())
+        .unwrap_or(UNSET_RANDAO_COMMITMENT);
+
+    if commitment != UNSET_RANDAO_COMMITMENT {
+        return process_hash_chain_randao(state, block, proposer_index, commitment);
+    }
+
+    // Unregistered validators must leave the hash-chain field empty (EIP-8321).
+    if let Ok(hash_chain_reveal) = block.body().hash_chain_reveal() {
+        block_verify!(
+            *hash_chain_reveal == Hash256::ZERO,
+            BlockProcessingError::RandaoSignatureInvalid
+        );
+    }
+
     if verify_signatures.is_true() {
         // Verify RANDAO reveal signature.
-        let proposer_index = ctxt.get_proposer_index(state, spec)?;
         block_verify!(
             randao_signature_set(
                 state,
                 |i| get_pubkey_from_state(state, i),
                 block,
-                Some(proposer_index),
+                Some(proposer_index as u64),
                 spec
             )?
             .verify(),
@@ -354,16 +383,92 @@ pub fn process_randao<E: EthSpec, Payload: AbstractExecPayload<E>>(
     Ok(())
 }
 
+/// Compute an EIP8321hash-chain commitment from a reveal:
+/// `blake3(HASH_CHAIN_RANDAO_DST || reveal)`.
+pub fn hash_chain_commitment(reveal: Hash256) -> Hash256 {
+    let mut preimage = Vec::with_capacity(HASH_CHAIN_RANDAO_DST.len().saturating_add(32));
+    preimage.extend_from_slice(HASH_CHAIN_RANDAO_DST);
+    preimage.extend_from_slice(reveal.as_slice());
+    Hash256::from_slice(blake3::hash(&preimage).as_bytes())
+}
+
+/// Fold a hash-chain reveal into the RANDAO accumulator: `blake3(mix || reveal)`.
+pub fn hash_chain_mix(mix: Hash256, reveal: Hash256) -> Hash256 {
+    let mut preimage = [0u8; 64];
+    preimage[..32].copy_from_slice(mix.as_slice());
+    preimage[32..].copy_from_slice(reveal.as_slice());
+    Hash256::from_slice(blake3::hash(&preimage).as_bytes())
+}
+
+/// Returns `true` if the signature is serialized as `G2_POINT_AT_INFINITY` (`0xc0 || 0x00..`).
+fn is_g2_point_at_infinity(signature: &Signature) -> bool {
+    let bytes = signature.serialize();
+    bytes.first() == Some(&0xc0) && bytes.iter().skip(1).all(|byte| *byte == 0)
+}
+
+/// Verify and apply an EIP-8321 hash-chain RANDAO reveal.
+fn process_hash_chain_randao<E: EthSpec, Payload: AbstractExecPayload<E>>(
+    state: &mut BeaconState<E>,
+    block: BeaconBlockRef<'_, E, Payload>,
+    proposer_index: usize,
+    commitment: Hash256,
+) -> Result<(), BlockProcessingError> {
+    let body = block.body();
+    let reveal = *body
+        .hash_chain_reveal()
+        .map_err(|_| BlockProcessingError::IncorrectStateType)?;
+
+    // The reveal must be non-zero and the legacy BLS reveal must be the point at infinity.
+    block_verify!(
+        reveal != Hash256::ZERO,
+        BlockProcessingError::RandaoSignatureInvalid
+    );
+    block_verify!(
+        is_g2_point_at_infinity(body.randao_reveal()),
+        BlockProcessingError::RandaoSignatureInvalid
+    );
+
+    // `blake3(HASH_CHAIN_RANDAO_DST + reveal) == commitment`
+    block_verify!(
+        hash_chain_commitment(reveal) == commitment,
+        BlockProcessingError::RandaoSignatureInvalid
+    );
+
+    // The accumulator uses `blake3(mix + reveal)` (not XOR) so copied commitments cannot
+    // be used to cancel out entropy.
+    let epoch = state.current_epoch();
+    let mix = state.get_randao_mix(epoch)?;
+    let new_mix = hash_chain_mix(*mix, reveal);
+
+    let i = epoch
+        .as_usize()
+        .safe_rem(E::EpochsPerHistoricalVector::to_usize())?;
+    *state
+        .randao_mixes_mut()
+        .get_mut(i)
+        .ok_or(BeaconStateError::RandaoMixesOutOfBounds(i))? = new_mix;
+
+    // The reveal becomes the validator's next commitment.
+    let commitments = state
+        .randao_commitments_mut()
+        .map_err(|_| BlockProcessingError::IncorrectStateType)?;
+    *commitments
+        .get_mut(proposer_index)
+        .ok_or(BlockProcessingError::IncorrectStateType)? = reveal;
+
+    Ok(())
+}
+
 /// Update the `state.eth1_data_votes` based upon the `eth1_data` provided.
 pub fn process_eth1_data<E: EthSpec>(
     state: &mut BeaconState<E>,
     eth1_data: &Eth1Data,
 ) -> Result<(), BeaconStateError> {
     if let Some(new_eth1_data) = get_new_eth1_data(state, eth1_data)? {
-        *state.eth1_data_mut() = new_eth1_data;
+        *state.eth1_data_mut()? = new_eth1_data;
     }
 
-    state.eth1_data_votes_mut().push(eth1_data.clone())?;
+    state.eth1_data_votes_mut()?.push(eth1_data.clone())?;
 
     Ok(())
 }
@@ -373,9 +478,9 @@ pub fn process_eth1_data<E: EthSpec>(
 pub fn get_new_eth1_data<E: EthSpec>(
     state: &BeaconState<E>,
     eth1_data: &Eth1Data,
-) -> Result<Option<Eth1Data>, ArithError> {
+) -> Result<Option<Eth1Data>, BeaconStateError> {
     let num_votes = state
-        .eth1_data_votes()
+        .eth1_data_votes()?
         .iter()
         .filter(|vote| *vote == eth1_data)
         .count();
@@ -544,10 +649,8 @@ pub fn compute_timestamp_at_slot<E: EthSpec>(
     block_slot: Slot,
     spec: &ChainSpec,
 ) -> Result<u64, ArithError> {
-    let slots_since_genesis = block_slot.as_u64().safe_sub(spec.genesis_slot.as_u64())?;
-    slots_since_genesis
-        .safe_mul(spec.get_slot_duration().as_secs())
-        .and_then(|since_genesis| state.genesis_time().safe_add(since_genesis))
+    let slots_since_genesis = block_slot.safe_sub(spec.genesis_slot)?;
+    spec.compute_time_at_slot::<E>(state.genesis_time(), slots_since_genesis)
 }
 
 /// Process the parent block's deferred execution payload effects.
@@ -597,8 +700,8 @@ pub fn process_parent_execution_payload<E: EthSpec, Payload: AbstractExecPayload
 /// Apply the parent execution payload's deferred effects to the state.
 ///
 /// This implements the spec's `apply_parent_execution_payload` function:
-/// 1. Processes deposits, withdrawals, and consolidations from execution requests
-/// 2. Queues the builder pending payment from the parent's committed bid
+/// 1. Queues the builder pending payment from the parent's committed bid
+/// 2. Processes deposits, withdrawals, and consolidations from execution requests
 /// 3. Updates `execution_payload_availability` and `latest_block_hash`
 pub fn apply_parent_execution_payload<E: EthSpec>(
     state: &mut BeaconState<E>,
@@ -615,14 +718,8 @@ pub fn apply_parent_execution_payload<E: EthSpec>(
 
     verify_execution_request_list_lengths(requests)?;
 
-    // Process execution requests from the parent's payload
-    process_operations::process_deposit_requests(state, &requests.deposits, spec)?;
-    process_operations::process_withdrawal_requests(state, &requests.withdrawals, spec)?;
-    process_operations::process_consolidation_requests(state, &requests.consolidations, spec)?;
-    process_operations::process_builder_deposit_requests(state, &requests.builder_deposits, spec)?;
-    process_operations::process_builder_exit_requests(state, &requests.builder_exits, spec)?;
-
-    // Queue the builder payment
+    // Settle the builder payment before the requests so a builder exit is rejected while the
+    // payment is pending
     if parent_epoch == state.current_epoch() {
         let payment_index = E::slots_per_epoch()
             .safe_add(parent_slot.as_u64().safe_rem(E::slots_per_epoch())?)?
@@ -644,6 +741,13 @@ pub fn apply_parent_execution_payload<E: EthSpec>(
             })
             .map_err(|e| BlockProcessingError::BeaconStateError(e.into()))?;
     }
+
+    // Process execution requests from the parent's payload
+    process_operations::process_deposit_requests(state, &requests.deposits, spec)?;
+    process_operations::process_withdrawal_requests(state, &requests.withdrawals, spec)?;
+    process_operations::process_consolidation_requests(state, &requests.consolidations, spec)?;
+    process_operations::process_builder_deposit_requests(state, &requests.builder_deposits, spec)?;
+    process_operations::process_builder_exit_requests(state, &requests.builder_exits, spec)?;
 
     // Update execution payload availability for the parent slot
     let availability_index = parent_slot
@@ -895,4 +999,51 @@ pub fn process_execution_payload_bid<E: EthSpec>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod eip8321_hash_tests {
+    use super::*;
+
+    #[test]
+    fn commitment_is_blake3_over_dst_and_reveal() {
+        let reveal = Hash256::repeat_byte(0x11);
+        let commitment = hash_chain_commitment(reveal);
+
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(HASH_CHAIN_RANDAO_DST);
+        preimage.extend_from_slice(reveal.as_slice());
+        assert_eq!(
+            commitment,
+            Hash256::from_slice(blake3::hash(&preimage).as_bytes())
+        );
+
+        // Distinct reveals produce distinct commitments.
+        assert_ne!(
+            commitment,
+            hash_chain_commitment(Hash256::repeat_byte(0x22))
+        );
+    }
+
+    #[test]
+    fn mix_depends_on_both_inputs() {
+        let mix = Hash256::repeat_byte(0x01);
+        let reveal = Hash256::repeat_byte(0x02);
+
+        let mixed = hash_chain_mix(mix, reveal);
+        assert_ne!(mixed, hash_chain_mix(Hash256::repeat_byte(0x03), reveal));
+        assert_ne!(mixed, hash_chain_mix(mix, Hash256::repeat_byte(0x04)));
+        // The accumulator is a hash, not a XOR: mixing the same reveal twice changes the result.
+        assert_ne!(hash_chain_mix(mixed, reveal), mixed);
+    }
+
+    #[test]
+    fn infinity_check_rejects_empty_signature() {
+        assert!(!is_g2_point_at_infinity(&Signature::empty()));
+
+        let mut bytes = [0u8; 96];
+        bytes[0] = 0xc0;
+        let infinity = Signature::deserialize(&bytes).expect("valid infinity signature");
+        assert!(is_g2_point_at_infinity(&infinity));
+    }
 }

@@ -210,6 +210,7 @@ pub struct QueuedGossipEnvelope {
 /// A block that arrived for processing when the same block was being imported over gossip.
 /// It is queued for later import.
 pub struct QueuedRpcBlock {
+    pub peer_id: lighthouse_network::PeerId,
     pub beacon_block_root: Hash256,
     /// Processes/imports the block.
     pub process_fn: AsyncFn,
@@ -790,7 +791,7 @@ impl<S: SlotClock> ReprocessQueue<S> {
                 // Register the timeout.
                 let delay_key = self.envelope_delay_queue.insert(
                     block_root,
-                    self.slot_clock.slot_duration() * QUEUED_ENVELOPE_DELAY_SLOTS,
+                    self.slot_clock.current_slot_duration() * QUEUED_ENVELOPE_DELAY_SLOTS,
                 );
 
                 // Store the envelope keyed by block root.
@@ -811,17 +812,8 @@ impl<S: SlotClock> ReprocessQueue<S> {
                             "RPC blocks queue is full"
                         );
                     }
-                    // Return the block to the beacon processor signalling to
-                    // ignore processing for this block
-                    if self
-                        .ready_work_tx
-                        .try_send(ReadyWork::IgnoredRpcBlock(IgnoredRpcBlock {
-                            process_fn: rpc_block.ignore_fn,
-                        }))
-                        .is_err()
-                    {
-                        error!("Failed to send rpc block to beacon processor");
-                    }
+                    // This only notifies sync; never queue the notification behind limited work.
+                    (rpc_block.ignore_fn)();
                     return;
                 }
 
@@ -834,12 +826,14 @@ impl<S: SlotClock> ReprocessQueue<S> {
                     %queued_rpc_block.beacon_block_root,
                     "Sending rpc block for reprocessing"
                 );
-                if self
+                if let Err(error) = self
                     .ready_work_tx
                     .try_send(ReadyWork::RpcBlock(queued_rpc_block))
-                    .is_err()
                 {
                     error!("Failed to send rpc block to beacon processor");
+                    if let ReadyWork::RpcBlock(block) = error.into_inner() {
+                        (block.ignore_fn)();
+                    }
                 }
             }
             InboundEvent::Msg(UnknownBlockAggregate(queued_aggregate)) => self
@@ -889,7 +883,7 @@ impl<S: SlotClock> ReprocessQueue<S> {
                 } else {
                     let delay_key = self.data_columns_delay_queue.insert(
                         block_root,
-                        self.slot_clock.slot_duration() * QUEUED_DATA_COLUMN_DELAY_SLOTS,
+                        self.slot_clock.current_slot_duration() * QUEUED_DATA_COLUMN_DELAY_SLOTS,
                     );
 
                     self.awaiting_data_columns_per_root
@@ -1144,7 +1138,7 @@ impl<S: SlotClock> ReprocessQueue<S> {
             }
             InboundEvent::Msg(DelayColumnReconstruction(request)) => {
                 let mut reconstruction_delay = QUEUED_RECONSTRUCTION_DELAY;
-                let slot_duration = self.slot_clock.slot_duration().as_millis() as u64;
+                let slot_duration = self.slot_clock.current_slot_duration().as_millis() as u64;
                 let reconstruction_deadline_millis =
                     (slot_duration * RECONSTRUCTION_DEADLINE.0) / RECONSTRUCTION_DEADLINE.1;
                 let reconstruction_deadline = Duration::from_millis(reconstruction_deadline_millis);
@@ -1455,7 +1449,7 @@ impl<S: SlotClock> ReprocessQueue<S> {
     /// Returns duration until the next scheduled processing time. The schedule ensure that backfill
     /// processing is done in windows of time that aren't critical
     fn duration_until_next_backfill_batch_event(slot_clock: &S) -> Duration {
-        let slot_duration = slot_clock.slot_duration();
+        let slot_duration = slot_clock.current_slot_duration();
         slot_clock
             .millis_from_current_slot_start()
             .and_then(|duration_from_slot_start| {
@@ -1790,6 +1784,66 @@ mod tests {
         ReprocessQueue::new(ready_work_tx, reprocess_work_rx, slot_clock)
     }
 
+    fn rpc_block_with_ignore_counter(
+        counter: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> QueuedRpcBlock {
+        QueuedRpcBlock {
+            peer_id: lighthouse_network::PeerId::random(),
+            beacon_block_root: Hash256::ZERO,
+            process_fn: Box::pin(async {}),
+            ignore_fn: Box::new(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_reprocessing_queue_full_notifies_rejected_work() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut queue = test_queue();
+        let counter = Arc::new(AtomicUsize::new(0));
+        for _ in 0..MAXIMUM_QUEUED_BLOCKS {
+            queue.handle_message(InboundEvent::Msg(ReprocessQueueMessage::RpcBlock(
+                rpc_block_with_ignore_counter(counter.clone()),
+            )));
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        queue.handle_message(InboundEvent::Msg(ReprocessQueueMessage::RpcBlock(
+            rpc_block_with_ignore_counter(counter.clone()),
+        )));
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(queue.rpc_block_delay_queue.len(), MAXIMUM_QUEUED_BLOCKS);
+    }
+
+    #[tokio::test]
+    async fn rpc_reprocessing_ready_send_failure_notifies_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut queue = test_queue();
+        let (ready_tx, ready_rx) = mpsc::channel(1);
+        ready_tx
+            .try_send(ReadyWork::IgnoredRpcBlock(IgnoredRpcBlock {
+                process_fn: Box::new(|| {}),
+            }))
+            .unwrap();
+        queue.ready_work_tx = ready_tx;
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        // Full channel.
+        queue.handle_message(InboundEvent::ReadyRpcBlock(rpc_block_with_ignore_counter(
+            counter.clone(),
+        )));
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        // Closed channel.
+        drop(ready_rx);
+        queue.handle_message(InboundEvent::ReadyRpcBlock(rpc_block_with_ignore_counter(
+            counter.clone(),
+        )));
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
     // This is a regression test for a memory leak in `awaiting_attestations_per_root`.
     // See: https://github.com/sigp/lighthouse/pull/8065
     #[tokio::test]
@@ -2087,7 +2141,7 @@ mod tests {
         let slot_clock = Arc::new(testing_slot_clock(slot_duration_secs));
         let mut queue = ReprocessQueue::new(ready_work_tx, reprocess_work_rx, slot_clock);
 
-        let slot_duration = queue.slot_clock.slot_duration();
+        let slot_duration = queue.slot_clock.current_slot_duration();
         let reconstruction_deadline_millis = (slot_duration.as_millis() as u64
             * RECONSTRUCTION_DEADLINE.0)
             / RECONSTRUCTION_DEADLINE.1;
@@ -2227,7 +2281,7 @@ mod tests {
         // Advance time to expire the envelope.
         advance_time(
             &queue.slot_clock,
-            queue.slot_clock.slot_duration() * QUEUED_ENVELOPE_DELAY_SLOTS * 2,
+            queue.slot_clock.current_slot_duration() * QUEUED_ENVELOPE_DELAY_SLOTS * 2,
         )
         .await;
         let ready_msg = queue.next().await.unwrap();
@@ -2378,7 +2432,7 @@ mod tests {
         // Advance time past the delay so the entry expires.
         advance_time(
             &queue.slot_clock,
-            2 * queue.slot_clock.slot_duration() * QUEUED_DATA_COLUMN_DELAY_SLOTS,
+            2 * queue.slot_clock.current_slot_duration() * QUEUED_DATA_COLUMN_DELAY_SLOTS,
         )
         .await;
         let ready_msg = queue.next().await.unwrap();

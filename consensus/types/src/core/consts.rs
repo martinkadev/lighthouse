@@ -42,3 +42,13 @@ pub mod gloas {
     pub const PTC_TIMELINESS_INDEX: usize = 1;
     pub const NUM_BLOCK_TIMELINESS_DEADLINES: usize = 2;
 }
+
+pub mod heze {
+    use crate::Hash256;
+
+    /// Domain separation tag for the hash-chain RANDAO chain (EIP-8321).
+    pub const HASH_CHAIN_RANDAO_DST: &[u8] = b"HASH_CHAIN_RANDAO";
+
+    /// Sentinel commitment indicating a validator has not registered a hash chain.
+    pub const UNSET_RANDAO_COMMITMENT: Hash256 = Hash256::ZERO;
+}

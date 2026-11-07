@@ -4,8 +4,8 @@ use crate::utils::{
     ResponseFilter, TaskSpawnerFilter,
 };
 use crate::version::{
-    ResponseIncludesVersion, V1, V2, add_consensus_version_header, beacon_response,
-    unsupported_version_rejection,
+    ResponseIncludesVersion, V1, V2, add_consensus_version_header, add_ssz_content_type_header,
+    beacon_response, unsupported_version_rejection,
 };
 use crate::{sync_committees, utils};
 use beacon_chain::observed_operations::ObservationOutcome;
@@ -14,7 +14,10 @@ use beacon_chain::{BeaconChain, BeaconChainTypes};
 use bytes::Bytes;
 use context_deserialize::ContextDeserialize;
 use eth2::CONSENSUS_VERSION_HEADER;
-use eth2::types::{AttestationPoolQuery, EndpointVersion, Failure, GenericResponse};
+use eth2::types::{
+    Accept, AttestationPoolQuery, EndpointVersion, Failure, GenericResponse,
+    PayloadAttestationPoolQuery,
+};
 use lighthouse_network::PubsubMessage;
 use network::NetworkMessage;
 use operation_pool::ReceivedPreCapella;
@@ -22,14 +25,16 @@ use slot_clock::SlotClock;
 use ssz::{Decode, Encode};
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
 use types::{
     Attestation, AttestationData, AttesterSlashing, ForkName, PayloadAttestationMessage,
-    ProposerSlashing, SignedBlsToExecutionChange, SignedVoluntaryExit, SingleAttestation,
-    SyncCommitteeMessage,
+    ProposerSlashing, SignedBlsToExecutionChange, SignedRandaoCommitmentRegistration,
+    SignedVoluntaryExit, SingleAttestation, SyncCommitteeMessage,
 };
 use warp::filters::BoxedFilter;
+use warp::http::response::Builder;
 use warp::{Filter, Reply};
 use warp_utils::reject::convert_rejection;
 
@@ -136,6 +141,119 @@ pub fn post_beacon_pool_bls_to_execution_changes<T: BeaconChainTypes>(
             },
         )
         .boxed()
+}
+
+/// POST beacon/pool/randao_commitment_registrations
+///
+/// Accepts a JSON array of `SignedRandaoCommitmentRegistration`, or a single registration
+/// (a convenience for clients that submit one at a time).
+///
+/// [New in Eip8321: EIP-8321]
+pub fn post_beacon_pool_randao_commitment_registrations<T: BeaconChainTypes>(
+    network_tx_filter: &NetworkTxFilter<T>,
+    beacon_pool_path: &BeaconPoolPathFilter<T>,
+) -> ResponseFilter {
+    beacon_pool_path
+        .clone()
+        .and(warp::path("randao_commitment_registrations"))
+        .and(warp::path::end())
+        .and(warp_utils::json::json::<serde_json::Value>())
+        .and(network_tx_filter.clone())
+        .then(
+            |task_spawner: TaskSpawner<T::EthSpec>,
+             chain: Arc<BeaconChain<T>>,
+             body: serde_json::Value,
+             network_tx: UnboundedSender<NetworkMessage<T::EthSpec>>| {
+                task_spawner.blocking_json_task(Priority::P0, move || {
+                    let registrations = parse_randao_commitment_registrations(body)?;
+
+                    let mut failures = vec![];
+
+                    for (index, registration) in registrations.into_iter().enumerate() {
+                        let validator_index = registration.message.validator_index;
+                        let commitment = registration.message.commitment;
+
+                        match chain.verify_randao_commitment_registration_for_gossip(
+                            &registration,
+                            Duration::from_secs(0),
+                        ) {
+                            Ok(()) => {
+                                let imported = chain
+                                    .op_pool
+                                    .insert_randao_commitment_registration(registration.clone());
+
+                                // Only gossip registrations that were new to the pool.
+                                if imported {
+                                    utils::publish_pubsub_message(
+                                        &network_tx,
+                                        PubsubMessage::RandaoCommitmentRegistration(Box::new(
+                                            registration,
+                                        )),
+                                    )?;
+                                } else {
+                                    debug!(
+                                        %validator_index,
+                                        "RANDAO commitment registration already known"
+                                    );
+                                }
+
+                                info!(
+                                    %validator_index,
+                                    %commitment,
+                                    published = imported,
+                                    "Processed RANDAO commitment registration"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    %validator_index,
+                                    reason = ?e,
+                                    source = "HTTP",
+                                    "Invalid RANDAO commitment registration"
+                                );
+                                failures.push(Failure::new(index, format!("invalid: {e:?}")));
+                            }
+                        }
+                    }
+
+                    if failures.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(warp_utils::reject::indexed_bad_request(
+                            "some RANDAO commitment registrations failed to verify".into(),
+                            failures,
+                        ))
+                    }
+                })
+            },
+        )
+        .boxed()
+}
+
+/// Deserialize the pool endpoint body: a JSON array of registrations, or a single registration.
+fn parse_randao_commitment_registrations(
+    body: serde_json::Value,
+) -> Result<Vec<SignedRandaoCommitmentRegistration>, warp::Rejection> {
+    if let serde_json::Value::Array(items) = body {
+        return items
+            .into_iter()
+            .map(|item| {
+                serde_json::from_value(item).map_err(|e| {
+                    warp_utils::reject::custom_bad_request(format!(
+                        "invalid RANDAO commitment registration: {e:?}"
+                    ))
+                })
+            })
+            .collect();
+    }
+
+    serde_json::from_value(body)
+        .map(|registration| vec![registration])
+        .map_err(|e| {
+            warp_utils::reject::custom_bad_request(format!(
+                "invalid RANDAO commitment registration: {e:?}"
+            ))
+        })
 }
 
 /// GET beacon/pool/bls_to_execution_changes
@@ -562,6 +680,57 @@ pub fn post_beacon_pool_attestations_v2<T: BeaconChainTypes>(
         .boxed()
 }
 
+/// GET beacon/pool/payload_attestations?slot
+pub fn get_beacon_pool_payload_attestations<T: BeaconChainTypes>(
+    beacon_pool_path: &BeaconPoolPathFilter<T>,
+) -> ResponseFilter {
+    beacon_pool_path
+        .clone()
+        .and(warp::path("payload_attestations"))
+        .and(warp::path::end())
+        .and(warp::query::<PayloadAttestationPoolQuery>())
+        .and(warp::header::optional::<Accept>("accept"))
+        .then(
+            |task_spawner: TaskSpawner<T::EthSpec>,
+             chain: Arc<BeaconChain<T>>,
+             query: PayloadAttestationPoolQuery,
+             accept_header: Option<Accept>| {
+                task_spawner.blocking_response_task(Priority::P1, move || {
+                    let payload_attestations = chain.op_pool.get_all_payload_attestations(|data| {
+                        query.slot.is_none_or(|slot| data.slot == slot)
+                    });
+
+                    // Hardcode Gloas: using the current slot's fork would return Fulu before the
+                    // Gloas fork, and the response fork becomes ambiguous once the pool holds
+                    // payload attestations from multiple forks. Revisit when Heze is added.
+                    let fork_name = ForkName::Gloas;
+
+                    match accept_header {
+                        Some(Accept::Ssz) => Builder::new()
+                            .status(200)
+                            .body(payload_attestations.as_ssz_bytes())
+                            .map(add_ssz_content_type_header)
+                            .map_err(|e| {
+                                warp_utils::reject::custom_server_error(format!(
+                                    "failed to create response: {}",
+                                    e
+                                ))
+                            }),
+                        _ => {
+                            let res = beacon_response(
+                                ResponseIncludesVersion::Yes(fork_name),
+                                &payload_attestations,
+                            );
+                            Ok(warp::reply::json(&res).into_response())
+                        }
+                    }
+                    .map(|resp| add_consensus_version_header(resp, fork_name))
+                })
+            },
+        )
+        .boxed()
+}
+
 /// POST beacon/pool/payload_attestations (JSON)
 pub fn post_beacon_pool_payload_attestations<T: BeaconChainTypes>(
     network_tx_filter: &NetworkTxFilter<T>,
@@ -700,5 +869,46 @@ fn publish_payload_attestation_messages<T: BeaconChainTypes>(
             "error processing payload attestations".to_string(),
             failures,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types::Hash256;
+
+    fn registration() -> SignedRandaoCommitmentRegistration {
+        SignedRandaoCommitmentRegistration {
+            message: types::RandaoCommitmentRegistration {
+                validator_index: 7,
+                commitment: Hash256::repeat_byte(0xab),
+            },
+            signature: bls::Signature::empty(),
+        }
+    }
+
+    #[test]
+    fn parses_a_registration_array() {
+        let body = serde_json::to_value(vec![registration()]).unwrap();
+        let parsed = parse_randao_commitment_registrations(body).unwrap();
+        assert_eq!(parsed, vec![registration()]);
+    }
+
+    #[test]
+    fn parses_a_single_registration() {
+        let body = serde_json::to_value(registration()).unwrap();
+        let parsed = parse_randao_commitment_registrations(body).unwrap();
+        assert_eq!(parsed, vec![registration()]);
+    }
+
+    #[test]
+    fn rejects_malformed_registrations() {
+        // A registration without a commitment is not a registration.
+        let body = serde_json::json!([{ "message": { "validator_index": 7 } }]);
+        assert!(parse_randao_commitment_registrations(body).is_err());
+
+        // Arrays are homogeneous: one bad entry rejects the whole body.
+        let body = serde_json::json!([registration(), { "nope": true }]);
+        assert!(parse_randao_commitment_registrations(body).is_err());
     }
 }

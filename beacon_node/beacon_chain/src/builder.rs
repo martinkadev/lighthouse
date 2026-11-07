@@ -4,6 +4,7 @@ use crate::beacon_chain::{
     BEACON_CHAIN_DB_KEY, CanonicalHead, LightClientProducerEvent, OP_POOL_DB_KEY,
 };
 use crate::beacon_proposer_cache::BeaconProposerCache;
+use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use crate::custody_context::NodeCustodyType;
 use crate::data_availability_checker::DataAvailabilityChecker;
 use crate::fork_choice_signal::ForkChoiceSignalTx;
@@ -96,7 +97,7 @@ pub struct BeaconChainBuilder<T: BeaconChainTypes> {
     op_pool: Option<OperationPool<T::EthSpec>>,
     execution_layer: Option<ExecutionLayer<T::EthSpec>>,
     proof_engine: Option<Arc<ProofEngine>>,
-    builders: Option<Arc<Builders>>,
+    builders: Option<Arc<Builders<T::EthSpec>>>,
     event_handler: Option<ServerSentEventHandler<T::EthSpec>>,
     slot_clock: Option<T::SlotClock>,
     shutdown_sender: Option<Sender<ShutdownReason>>,
@@ -636,7 +637,7 @@ where
     }
 
     /// Sets the `BeaconChain` builder service (the Gloas Builder API client).
-    pub fn builders(mut self, builders: Option<Arc<Builders>>) -> Self {
+    pub fn builders(mut self, builders: Option<Arc<Builders<E>>>) -> Self {
         self.builders = builders;
         self
     }
@@ -996,6 +997,9 @@ where
         debug!(?custody_context, "Loaded persisted custody context");
         let custody_context = Arc::new(custody_context);
 
+        let circuit_breaker =
+            CircuitBreaker::new::<E>(CircuitBreakerConfig::from_chain_config(&self.chain_config));
+
         let beacon_chain = BeaconChain {
             spec: self.spec.clone(),
             config: self.chain_config,
@@ -1066,7 +1070,7 @@ where
             graffiti_calculator: GraffitiCalculator::new(
                 self.beacon_graffiti,
                 self.execution_layer,
-                slot_clock.slot_duration() * E::slots_per_epoch() as u32,
+                slot_clock.current_slot_duration() * E::slots_per_epoch() as u32,
             ),
             slasher: self.slasher.clone(),
             validator_monitor: RwLock::new(validator_monitor),
@@ -1098,6 +1102,7 @@ where
                 .map(Arc::new),
             rng: Arc::new(Mutex::new(rng)),
             gossip_verified_payload_bid_cache: <_>::default(),
+            circuit_breaker,
             gossip_verified_proposer_preferences_cache: <_>::default(),
             observed_payload_envelopes: <_>::default(),
         };
@@ -1207,19 +1212,16 @@ where
     TColdStore: ItemStore + 'static,
     E: EthSpec + 'static,
 {
-    /// Sets the `BeaconChain` slot clock to `TestingSlotClock`.
+    /// Sets the `BeaconChain` slot clock to a `TestingSlotClock` that follows the spec.
     ///
     /// Requires the state to be initialized.
-    pub fn testing_slot_clock(self, slot_duration: Duration) -> Result<Self, String> {
+    pub fn testing_slot_clock(self) -> Result<Self, String> {
         let genesis_time = self
             .genesis_time
             .ok_or("testing_slot_clock requires an initialized state")?;
 
-        let slot_clock = TestingSlotClock::new(
-            Slot::new(0),
-            Duration::from_secs(genesis_time),
-            slot_duration,
-        );
+        let slot_clock =
+            TestingSlotClock::from_spec::<E>(Duration::from_secs(genesis_time), &self.spec);
 
         Ok(self.slot_clock(slot_clock))
     }
@@ -1563,7 +1565,6 @@ mod test {
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use ssz::Encode;
-    use std::time::Duration;
     use store::config::StoreConfig;
     use store::{HotColdDB, MemoryStore};
     use task_executor::test_utils::TestRuntime;
@@ -1600,7 +1601,7 @@ mod test {
             .task_executor(runtime.task_executor.clone())
             .genesis_state(genesis_state)
             .expect("should build state using recent genesis")
-            .testing_slot_clock(Duration::from_secs(1))
+            .testing_slot_clock()
             .expect("should configure testing slot clock")
             .shutdown_sender(shutdown_tx)
             .rng(Box::new(StdRng::seed_from_u64(42)))
@@ -1663,7 +1664,7 @@ mod test {
         .expect("should build state");
 
         assert_eq!(
-            state.eth1_data().block_hash,
+            state.eth1_data().unwrap().block_hash,
             Hash256::from_slice(&[0x42; 32]),
             "eth1 block hash should be co-ordinated junk"
         );

@@ -29,8 +29,7 @@ const CAPELLA_FORK_EPOCH: u64 = 0;
 const DENEB_FORK_EPOCH: u64 = 0;
 const ELECTRA_FORK_EPOCH: u64 = 0;
 const FULU_FORK_EPOCH: u64 = 0;
-// TODO(gloas): enable Gloas in simulator, current blocker is lack of data column gossip verification
-// const GLOAS_FORK_EPOCH: u64 = 2;
+const GLOAS_FORK_EPOCH: u64 = 2;
 
 // Since simulator tests are non-deterministic and there is a non-zero chance of missed
 // attestations, define an acceptable network-wide attestation performance.
@@ -180,7 +179,7 @@ pub fn run_fallback_sim(matches: &ArgMatches) -> Result<(), String> {
 
     let genesis_delay = GENESIS_DELAY;
 
-    let mut slot_duration_ms = spec.get_slot_duration().as_millis() as u64;
+    let mut slot_duration_ms = spec.genesis_slot_duration().as_millis() as u64;
     slot_duration_ms /= speed_up_factor;
     slot_duration_ms = max(1_000, slot_duration_ms);
     spec = spec.set_slot_duration_ms::<MinimalEthSpec>(slot_duration_ms);
@@ -194,10 +193,11 @@ pub fn run_fallback_sim(matches: &ArgMatches) -> Result<(), String> {
     spec.deneb_fork_epoch = Some(Epoch::new(DENEB_FORK_EPOCH));
     spec.electra_fork_epoch = Some(Epoch::new(ELECTRA_FORK_EPOCH));
     spec.fulu_fork_epoch = Some(Epoch::new(FULU_FORK_EPOCH));
+    spec.gloas_fork_epoch = Some(Epoch::new(GLOAS_FORK_EPOCH));
     let spec = Arc::new(spec);
     env.eth2_config.spec = spec.clone();
 
-    let slot_duration = spec.get_slot_duration();
+    let slot_duration = spec.genesis_slot_duration();
     let slots_per_epoch = MinimalEthSpec::slots_per_epoch();
 
     let disconnection_epoch = 1;

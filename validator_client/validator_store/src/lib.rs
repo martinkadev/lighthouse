@@ -8,11 +8,13 @@ use std::future::Future;
 use std::sync::Arc;
 use types::{
     Address, Attestation, AttestationData, BlindedBeaconBlock, Epoch, EthSpec,
-    ExecutionPayloadEnvelope, Graffiti, Hash256, PayloadAttestationData, PayloadAttestationMessage,
-    ProposerPreferences, SelectionProof, SignedAggregateAndProof, SignedBlindedBeaconBlock,
-    SignedContributionAndProof, SignedExecutionPayloadEnvelope, SignedProposerPreferences,
-    SignedValidatorRegistrationData, SingleAttestation, Slot, SyncCommitteeContribution,
-    SyncCommitteeMessage, SyncSelectionProof, SyncSubnetId, ValidatorRegistrationData,
+    ExecutionPayloadEnvelope, Graffiti, Hash256, InclusionList, PayloadAttestationData,
+    PayloadAttestationMessage, ProposerPreferences, RandaoCommitmentRegistration, SelectionProof,
+    SignedAggregateAndProof, SignedBlindedBeaconBlock, SignedContributionAndProof,
+    SignedExecutionPayloadEnvelope, SignedInclusionList, SignedProposerPreferences,
+    SignedRandaoCommitmentRegistration, SignedValidatorRegistrationData, SingleAttestation, Slot,
+    SyncCommitteeContribution, SyncCommitteeMessage, SyncSelectionProof, SyncSubnetId,
+    ValidatorRegistrationData,
 };
 
 #[derive(Debug, PartialEq, Clone)]
@@ -129,6 +131,17 @@ pub trait ValidatorStore: Send + Sync {
         signing_epoch: Epoch,
     ) -> impl Future<Output = Result<Signature, Error<Self::Error>>> + Send;
 
+    /// Sign a hash-chain RANDAO commitment registration for `validator_pubkey`.
+    ///
+    /// The registration domain is fork-agnostic (`compute_domain` with the genesis fork version).
+    ///
+    /// [New in Eip8321: EIP-8321]
+    fn sign_randao_commitment_registration(
+        &self,
+        validator_pubkey: PublicKeyBytes,
+        registration: RandaoCommitmentRegistration,
+    ) -> impl Future<Output = Result<SignedRandaoCommitmentRegistration, Error<Self::Error>>> + Send;
+
     fn set_validator_index(&self, validator_pubkey: &PublicKeyBytes, index: u64);
 
     /// Sign `block` and apply slashing protection.
@@ -225,6 +238,12 @@ pub trait ValidatorStore: Send + Sync {
         validator_pubkey: PublicKeyBytes,
         request_auth_v1: RequestAuth,
     ) -> impl Future<Output = Result<SignedRequestAuth, Error<Self::Error>>> + Send;
+
+    fn sign_inclusion_list(
+        &self,
+        validator_pubkey: PublicKeyBytes,
+        inclusion_list: InclusionList,
+    ) -> impl Future<Output = Result<SignedInclusionList, Error<Self::Error>>> + Send;
 
     /// Returns `ProposalData` for the provided `pubkey` if it exists in `InitializedValidators`.
     /// `ProposalData` fields include defaulting logic described in `get_fee_recipient_defaulting`,

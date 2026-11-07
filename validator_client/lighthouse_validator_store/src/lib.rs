@@ -22,13 +22,15 @@ use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
 use types::{
     AbstractExecPayload, Address, AggregateAndProof, Attestation, AttestationData, BeaconBlock,
     BlindedPayload, ChainSpec, ContributionAndProof, Domain, Epoch, EthSpec,
-    ExecutionPayloadEnvelope, Fork, FullPayload, Graffiti, Hash256, PayloadAttestationData,
-    PayloadAttestationMessage, ProposerPreferences, SelectionProof, SignedAggregateAndProof,
-    SignedBeaconBlock, SignedContributionAndProof, SignedExecutionPayloadEnvelope,
-    SignedProposerPreferences, SignedRoot, SignedValidatorRegistrationData, SignedVoluntaryExit,
-    SingleAttestation, Slot, SyncAggregatorSelectionData, SyncCommitteeContribution,
-    SyncCommitteeMessage, SyncSelectionProof, SyncSubnetId, ValidatorRegistrationData,
-    VoluntaryExit, graffiti::GraffitiString,
+    ExecutionPayloadEnvelope, Fork, FullPayload, Graffiti, Hash256, InclusionList,
+    PayloadAttestationData, PayloadAttestationMessage, ProposerPreferences,
+    RandaoCommitmentRegistration, SelectionProof, SignedAggregateAndProof, SignedBeaconBlock,
+    SignedContributionAndProof, SignedExecutionPayloadEnvelope, SignedInclusionList,
+    SignedProposerPreferences, SignedRandaoCommitmentRegistration, SignedRoot,
+    SignedValidatorRegistrationData, SignedVoluntaryExit, SingleAttestation, Slot,
+    SyncAggregatorSelectionData, SyncCommitteeContribution, SyncCommitteeMessage,
+    SyncSelectionProof, SyncSubnetId, ValidatorRegistrationData, VoluntaryExit,
+    graffiti::GraffitiString,
 };
 use validator_store::{
     AggregateToSign, AttestationToSign, ContributionToSign, DoppelgangerStatus,
@@ -990,6 +992,53 @@ impl<T: SlotClock + 'static, E: EthSpec> ValidatorStore for LighthouseValidatorS
         Ok(signature)
     }
 
+    /// Sign a hash-chain RANDAO commitment registration.
+    ///
+    /// The registration domain is fork-agnostic: `compute_domain` is applied with the *genesis*
+    /// fork version, so the signing context deliberately uses the genesis fork rather than the
+    /// fork at the current epoch.
+    ///
+    /// [New in Eip8321: EIP-8321]
+    #[instrument(level = "debug", skip_all)]
+    async fn sign_randao_commitment_registration(
+        &self,
+        validator_pubkey: PublicKeyBytes,
+        registration: RandaoCommitmentRegistration,
+    ) -> Result<SignedRandaoCommitmentRegistration, Error> {
+        let signing_method = self.doppelganger_checked_signing_method(validator_pubkey)?;
+
+        let signing_epoch = self
+            .slot_clock
+            .now()
+            .map_or(Epoch::new(0), |slot| slot.epoch(E::slots_per_epoch()));
+        let signing_context = SigningContext {
+            domain: Domain::RandaoCommitmentRegistration,
+            epoch: signing_epoch,
+            // Any fork whose `current_version` is the genesis fork version yields the
+            // fork-agnostic `compute_domain(.., genesis_fork_version, ..)` domain.
+            fork: Fork {
+                previous_version: self.spec.genesis_fork_version,
+                current_version: self.spec.genesis_fork_version,
+                epoch: Epoch::new(0),
+            },
+            genesis_validators_root: self.genesis_validators_root,
+        };
+
+        let signature = signing_method
+            .get_signature::<E, BlindedPayload<E>>(
+                SignableMessage::RandaoCommitmentRegistration(&registration),
+                signing_context,
+                &self.spec,
+                &self.task_executor,
+            )
+            .await?;
+
+        Ok(SignedRandaoCommitmentRegistration {
+            message: registration,
+            signature,
+        })
+    }
+
     fn set_validator_index(&self, validator_pubkey: &PublicKeyBytes, index: u64) {
         self.initialized_validators()
             .write()
@@ -1549,6 +1598,35 @@ impl<T: SlotClock + 'static, E: EthSpec> ValidatorStore for LighthouseValidatorS
 
         Ok(SignedRequestAuth {
             message: request_auth_v1,
+            signature,
+        })
+    }
+
+    async fn sign_inclusion_list(
+        &self,
+        validator_pubkey: PublicKeyBytes,
+        inclusion_list: InclusionList,
+    ) -> Result<SignedInclusionList, Error> {
+        let signing_context = self.signing_context(
+            Domain::InclusionListCommittee,
+            inclusion_list.slot.epoch(E::slots_per_epoch()),
+        );
+
+        // Inclusion list signing is not slashable, bypass doppelganger protection.
+        let signing_method = self.doppelganger_bypassed_signing_method(validator_pubkey)?;
+
+        let signature = signing_method
+            .get_signature::<E, FullPayload<E>>(
+                SignableMessage::InclusionList(&inclusion_list),
+                signing_context,
+                &self.spec,
+                &self.task_executor,
+            )
+            .await
+            .map_err(Error::SpecificError)?;
+
+        Ok(SignedInclusionList {
+            message: inclusion_list,
             signature,
         })
     }

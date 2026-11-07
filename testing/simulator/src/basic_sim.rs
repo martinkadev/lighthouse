@@ -32,8 +32,7 @@ const CAPELLA_FORK_EPOCH: u64 = 0;
 const DENEB_FORK_EPOCH: u64 = 0;
 const ELECTRA_FORK_EPOCH: u64 = 0;
 const FULU_FORK_EPOCH: u64 = 0;
-// TODO(gloas): enable Gloas in simulator, current blocker is lack of data column gossip verification
-// const GLOAS_FORK_EPOCH: u64 = 2;
+const GLOAS_FORK_EPOCH: u64 = 2;
 
 const SUGGESTED_FEE_RECIPIENT: [u8; 20] =
     [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
@@ -172,10 +171,10 @@ pub fn run_basic_sim(matches: &ArgMatches) -> Result<(), String> {
     let genesis_delay = GENESIS_DELAY;
 
     // Convenience variables. Update these values when adding a newer fork.
-    let latest_fork_version = spec.fulu_fork_version;
-    let latest_fork_start_epoch = FULU_FORK_EPOCH;
+    let latest_fork_version = spec.gloas_fork_version;
+    let latest_fork_start_epoch = GLOAS_FORK_EPOCH;
 
-    let mut slot_duration_ms = spec.get_slot_duration().as_millis() as u64;
+    let mut slot_duration_ms = spec.genesis_slot_duration().as_millis() as u64;
     slot_duration_ms /= speed_up_factor;
     slot_duration_ms = max(1_000, slot_duration_ms);
     spec = spec.set_slot_duration_ms::<MinimalEthSpec>(slot_duration_ms);
@@ -189,10 +188,11 @@ pub fn run_basic_sim(matches: &ArgMatches) -> Result<(), String> {
     spec.deneb_fork_epoch = Some(Epoch::new(DENEB_FORK_EPOCH));
     spec.electra_fork_epoch = Some(Epoch::new(ELECTRA_FORK_EPOCH));
     spec.fulu_fork_epoch = Some(Epoch::new(FULU_FORK_EPOCH));
+    spec.gloas_fork_epoch = Some(Epoch::new(GLOAS_FORK_EPOCH));
     let spec = Arc::new(spec);
     env.eth2_config.spec = spec.clone();
 
-    let slot_duration = spec.get_slot_duration();
+    let slot_duration = spec.genesis_slot_duration();
     let slots_per_epoch = MinimalEthSpec::slots_per_epoch();
     let initial_validator_count = spec.min_genesis_active_validator_count as usize;
 
@@ -352,7 +352,8 @@ pub fn run_basic_sim(matches: &ArgMatches) -> Result<(), String> {
                 network.clone(),
                 // Sync aggregate available from slot 1 after Altair fork transition.
                 Epoch::new(ALTAIR_FORK_EPOCH).start_slot(slots_per_epoch) + 1,
-                Epoch::new(END_EPOCH).start_slot(slots_per_epoch),
+                // The Gloas fork block still attests a Fulu parent (#9587).
+                Epoch::new(GLOAS_FORK_EPOCH).start_slot(slots_per_epoch),
                 slot_duration
             ),
             checks::verify_full_blob_production_up_to(

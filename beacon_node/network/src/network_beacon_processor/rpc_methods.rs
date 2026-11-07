@@ -3,6 +3,7 @@ use crate::network_beacon_processor::{FUTURE_SLOT_TOLERANCE, NetworkBeaconProces
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
 use crate::sync::SyncMessage;
+use beacon_chain::inclusion_list_store::InclusionListKey;
 use beacon_chain::payload_envelope_streamer::{
     EnvelopeRequestSource, Error as EnvelopeStreamerError,
 };
@@ -10,7 +11,8 @@ use beacon_chain::{BeaconChainError, BeaconChainTypes, BlockProcessStatus, WhenS
 use itertools::{Itertools, process_results};
 use lighthouse_network::rpc::methods::{
     BlobsByRangeRequest, BlobsByRootRequest, BlocksByHeadRequest, DataColumnsByRangeRequest,
-    DataColumnsByRootRequest, PayloadEnvelopesByRangeRequest, PayloadEnvelopesByRootRequest,
+    DataColumnsByRootRequest, InclusionListsByIndicesRequest, PayloadEnvelopesByRangeRequest,
+    PayloadEnvelopesByRootRequest,
 };
 use lighthouse_network::rpc::*;
 use lighthouse_network::{PeerId, ReportSource, Response, SyncInfo};
@@ -93,6 +95,15 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     ) -> Result<Option<String>, Box<BeaconChainError>> {
         let local = self.chain.status_message();
         let start_slot = |epoch: Epoch| epoch.start_slot(T::EthSpec::slots_per_epoch());
+        let latest_allowed_slot = self
+            .chain
+            .slot()
+            .unwrap_or_else(|_| self.chain.slot_clock.genesis_slot())
+            .saturating_add(FUTURE_SLOT_TOLERANCE);
+        // Epoch F cannot be finalized before F + 2. Apply clock tolerance before epoch rounding.
+        let max_finalized_epoch = latest_allowed_slot
+            .epoch(T::EthSpec::slots_per_epoch())
+            .saturating_sub(2u64);
 
         let irrelevant_reason = if local.fork_digest() != remote.fork_digest() {
             // The node is on a different network/fork
@@ -101,17 +112,13 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 hex::encode(local.fork_digest()),
                 hex::encode(remote.fork_digest())
             ))
-        } else if *remote.head_slot()
-            > self
-                .chain
-                .slot()
-                .unwrap_or_else(|_| self.chain.slot_clock.genesis_slot())
-                + FUTURE_SLOT_TOLERANCE
-        {
+        } else if *remote.head_slot() > latest_allowed_slot {
             // The remote's head is on a slot that is significantly ahead of what we consider the
             // current slot. This could be because they are using a different genesis time, or that
             // their or our system's clock is incorrect.
             Some("Different system clocks or genesis time".to_string())
+        } else if *remote.finalized_epoch() > max_finalized_epoch {
+            Some("Finalized epoch is too recent".to_string())
         } else if (remote.finalized_epoch() == local.finalized_epoch()
             && remote.finalized_root() == local.finalized_root())
             || remote.finalized_root().is_zero()
@@ -122,6 +129,9 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             // genesis, or they are ahead. In all cases, we should allow this peer to connect to us
             // so we can sync from them.
             None
+        } else if remote.finalized_epoch() == local.finalized_epoch() {
+            // Both roots are nonzero and differ, so no database lookup is needed.
+            Some("Different finalized chain".to_string())
         } else {
             // Remote finalized epoch is less than ours.
             let remote_finalized_slot = start_slot(*remote.finalized_epoch());
@@ -854,6 +864,129 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             request = ?request.data_column_ids,
             returned = send_data_column_count,
             "Received DataColumnsByRoot Request"
+        );
+
+        Ok(())
+    }
+
+    /// Handle an `InclusionListsByIndices` request from the peer.
+    #[instrument(
+        name = "lh_handle_inclusion_lists_by_indices_request",
+        parent = None,
+        level = "debug",
+        skip_all,
+        fields(peer_id = %peer_id, client = tracing::field::Empty)
+    )]
+    pub fn handle_inclusion_lists_by_indices_request(
+        self: Arc<Self>,
+        peer_id: PeerId,
+        inbound_request_id: InboundRequestId,
+        request: InclusionListsByIndicesRequest<T::EthSpec>,
+    ) {
+        let client = self.network_globals.client(&peer_id);
+        Span::current().record("client", field::display(client.kind));
+
+        self.terminate_response_stream(
+            peer_id,
+            inbound_request_id,
+            self.handle_inclusion_lists_by_indices_request_inner(
+                peer_id,
+                inbound_request_id,
+                &request,
+            ),
+            Response::InclusionListsByIndices,
+        );
+    }
+
+    /// Handle an `InclusionListsByIndices` request from the peer.
+    fn handle_inclusion_lists_by_indices_request_inner(
+        &self,
+        peer_id: PeerId,
+        inbound_request_id: InboundRequestId,
+        request: &InclusionListsByIndicesRequest<T::EthSpec>,
+    ) -> Result<(), (RpcErrorResponse, &'static str)> {
+        let current_slot = self
+            .chain
+            .slot()
+            .unwrap_or_else(|_| self.chain.slot_clock.genesis_slot());
+
+        // `heze_fork_epoch` holds the far future sentinel when Heze is unscheduled.
+        let first_heze_slot = self
+            .chain
+            .spec
+            .heze_fork_epoch
+            .filter(|_| self.chain.spec.is_heze_scheduled())
+            .map(|epoch| epoch.start_slot(T::EthSpec::slots_per_epoch()))
+            .unwrap_or_else(|| Slot::new(0));
+        let minimum_request_slot = std::cmp::max(
+            current_slot.saturating_sub(self.chain.spec.min_slots_for_inclusion_lists_requests),
+            first_heze_slot,
+        );
+
+        if request.slot < minimum_request_slot {
+            return Err((
+                RpcErrorResponse::ResourceUnavailable,
+                "Request slot is outside the retained window",
+            ));
+        }
+
+        // The committee maps the requested positions to validator indices. The block must not be
+        // from a later epoch than the slot, or the shuffling won't resolve.
+        let anchor_block_root = self
+            .chain
+            .block_root_at_slot(request.slot, WhenSlotSkipped::Prev)
+            .map_err(|_| (RpcErrorResponse::ServerError, "Error reading block roots"))?
+            .ok_or((
+                RpcErrorResponse::ResourceUnavailable,
+                "No block known at or before the requested slot",
+            ))?;
+
+        let committee = self
+            .chain
+            .inclusion_list_key(anchor_block_root, request.slot)
+            .and_then(|key| self.chain.get_inclusion_list_committee(&key))
+            .map_err(|_| {
+                (
+                    RpcErrorResponse::ServerError,
+                    "Error computing the inclusion list committee",
+                )
+            })?;
+
+        let requested_validators = request
+            .indices
+            .iter()
+            .enumerate()
+            .filter(|(_, requested)| *requested)
+            .filter_map(|(position, _)| committee.get(position).copied())
+            .collect::<Vec<_>>();
+
+        // The store is keyed by `(slot, dependent_root)`, so an unknown dependent root returns
+        // nothing rather than another committee's lists.
+        let inclusion_lists = self
+            .chain
+            .inclusion_list_store
+            .read()
+            .get_signed_inclusion_lists(
+                &InclusionListKey::new(request.slot, request.dependent_root),
+                &requested_validators,
+            );
+
+        let returned = inclusion_lists.len();
+        for inclusion_list in inclusion_lists {
+            self.send_response(
+                peer_id,
+                inbound_request_id,
+                Response::InclusionListsByIndices(Some(Arc::new(inclusion_list))),
+            );
+        }
+
+        debug!(
+            %peer_id,
+            slot = %request.slot,
+            dependent_root = ?request.dependent_root,
+            requested = request.indices.num_set_bits(),
+            returned,
+            "Received InclusionListsByIndices Request"
         );
 
         Ok(())

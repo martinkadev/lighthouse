@@ -12,12 +12,13 @@ pub use crate::proto_array::{
 pub use crate::proto_array_fork_choice::{
     Block, DoNotReOrg, ExecutionStatus, ExecutionVerdict, ForkChoiceNode, LatestMessage,
     PayloadBlockHash, PayloadStatus, ProposerHeadError, ProposerHeadInfo, ProtoArrayForkChoice,
-    ReOrgThreshold,
 };
 pub use error::Error;
 
 pub mod core {
-    pub use super::proto_array::{ProposerBoost, ProtoArray, ProtoNode};
+    pub use super::proto_array::{
+        ProposerBoost, ProtoArray, ProtoNode, ProtoNodeV29, ProtoNodeV33,
+    };
     pub use super::proto_array_fork_choice::VoteTracker;
     pub use super::ssz_container::{SszContainer, SszContainerV28, SszContainerV29};
 }

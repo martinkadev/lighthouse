@@ -20,6 +20,7 @@ use types::{
     BlobSidecar, ChainSpec, DataColumnSidecar, DataColumnsByRootIdentifier, EthSpec, ForkContext,
     ForkName, ForkVersionDecode, Hash256, LightClientBootstrap, LightClientFinalityUpdate,
     LightClientOptimisticUpdate, LightClientUpdate, SignedBeaconBlock, SignedBeaconBlockBase,
+    SignedInclusionList,
 };
 use unsigned_varint::codec::Uvi;
 
@@ -81,6 +82,7 @@ impl<E: EthSpec> SSZSnappyInboundCodec<E> {
                 RpcSuccessResponse::BlobsByRoot(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::DataColumnsByRoot(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::DataColumnsByRange(res) => res.as_ssz_bytes(),
+                RpcSuccessResponse::InclusionListsByIndices(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::LightClientBootstrap(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::LightClientOptimisticUpdate(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::LightClientFinalityUpdate(res) => res.as_ssz_bytes(),
@@ -364,6 +366,7 @@ impl<E: EthSpec> Encoder<RequestType<E>> for SSZSnappyOutboundCodec<E> {
             RequestType::BlobsByRoot(req) => req.blob_ids.as_ssz_bytes(),
             RequestType::DataColumnsByRange(req) => req.as_ssz_bytes(),
             RequestType::DataColumnsByRoot(req) => req.data_column_ids.as_ssz_bytes(),
+            RequestType::InclusionListsByIndices(req) => req.as_ssz_bytes(),
             RequestType::Ping(req) => req.as_ssz_bytes(),
             RequestType::LightClientBootstrap(req) => req.as_ssz_bytes(),
             RequestType::LightClientUpdatesByRange(req) => req.as_ssz_bytes(),
@@ -591,6 +594,11 @@ fn handle_rpc_request<E: EthSpec>(
                     )?,
             },
         ))),
+        SupportedProtocol::InclusionListsByIndicesV1 => {
+            Ok(Some(RequestType::InclusionListsByIndices(
+                InclusionListsByIndicesRequest::from_ssz_bytes(decoded_buffer)?,
+            )))
+        }
         SupportedProtocol::PingV1 => Ok(Some(RequestType::Ping(Ping {
             data: u64::from_ssz_bytes(decoded_buffer)?,
         }))),
@@ -796,6 +804,27 @@ fn handle_rpc_response<E: EthSpec>(
                 ),
             )),
         },
+        SupportedProtocol::InclusionListsByIndicesV1 => match fork_name {
+            Some(fork_name) => {
+                if fork_name.heze_enabled() {
+                    Ok(Some(RpcSuccessResponse::InclusionListsByIndices(Arc::new(
+                        SignedInclusionList::from_ssz_bytes(decoded_buffer)?,
+                    ))))
+                } else {
+                    Err(RPCError::ErrorResponse(
+                        RpcErrorResponse::InvalidRequest,
+                        "Invalid fork name for inclusion lists by indices".to_string(),
+                    ))
+                }
+            }
+            None => Err(RPCError::ErrorResponse(
+                RpcErrorResponse::InvalidRequest,
+                format!(
+                    "No context bytes provided for {:?} response",
+                    versioned_protocol
+                ),
+            )),
+        },
         SupportedProtocol::PingV1 => Ok(Some(RpcSuccessResponse::Pong(Ping {
             data: u64::from_ssz_bytes(decoded_buffer)?,
         }))),
@@ -935,12 +964,10 @@ mod tests {
     use types::{
         BeaconBlock, BeaconBlockAltair, BeaconBlockBase, BeaconBlockBellatrix, BeaconBlockHeader,
         DataColumnsByRootIdentifier, EmptyBlock, Epoch, FullPayload, KzgCommitment, KzgProof,
-        SignedBeaconBlockHeader, Slot,
+        SignedBeaconBlockHeader, Slot, Spec,
         data::{BlobIdentifier, Cell},
     };
-    use types::{BlobSidecar, DataColumnSidecarFulu};
-
-    type Spec = types::MainnetEthSpec;
+    use types::{BlobSidecar, DataColumnSidecarFulu, InclusionList, InclusionListBits};
 
     fn spec_with_all_forks_enabled() -> ChainSpec {
         let mut chain_spec = Spec::default_spec();
@@ -952,6 +979,7 @@ mod tests {
         chain_spec.fulu_fork_epoch = Some(Epoch::new(6));
         chain_spec.gloas_fork_epoch = Some(Epoch::new(7));
         chain_spec.heze_fork_epoch = Some(Epoch::new(8));
+        chain_spec.eip8321_fork_epoch = Some(Epoch::new(9));
 
         // check that we have all forks covered
         assert!(chain_spec.fork_epoch(ForkName::latest()).is_some());
@@ -1128,6 +1156,31 @@ mod tests {
         .unwrap()
     }
 
+    fn ilbindices_request() -> InclusionListsByIndicesRequest<Spec> {
+        let mut indices = InclusionListBits::<Spec>::new();
+        indices.set(0, true).unwrap();
+        indices.set(3, true).unwrap();
+        InclusionListsByIndicesRequest {
+            slot: Slot::new(1),
+            dependent_root: Hash256::zero(),
+            indices,
+        }
+    }
+
+    fn empty_signed_inclusion_list(spec: &ChainSpec) -> Arc<SignedInclusionList> {
+        // The context bytes are derived from the inclusion list slot, so it must be set here.
+        Arc::new(SignedInclusionList {
+            message: InclusionList {
+                slot: spec
+                    .heze_fork_epoch
+                    .expect("heze fork epoch must be set")
+                    .start_slot(Spec::slots_per_epoch()),
+                ..InclusionList::default()
+            },
+            signature: Signature::empty(),
+        })
+    }
+
     fn ping_message() -> Ping {
         Ping { data: 1 }
     }
@@ -1290,6 +1343,9 @@ mod tests {
             }
             RequestType::DataColumnsByRange(dcbrange) => {
                 assert_eq!(decoded, RequestType::DataColumnsByRange(dcbrange))
+            }
+            RequestType::InclusionListsByIndices(ilbindices) => {
+                assert_eq!(decoded, RequestType::InclusionListsByIndices(ilbindices))
             }
             RequestType::Ping(ping) => {
                 assert_eq!(decoded, RequestType::Ping(ping))
@@ -1608,6 +1664,52 @@ mod tests {
                 empty_data_column_sidecar(&chain_spec)
             ))),
         );
+    }
+
+    #[test]
+    fn inclusion_lists_by_indices_response_round_trips() {
+        let chain_spec = spec_with_all_forks_enabled();
+
+        assert_eq!(
+            encode_then_decode_response(
+                SupportedProtocol::InclusionListsByIndicesV1,
+                RpcResponse::Success(RpcSuccessResponse::InclusionListsByIndices(
+                    empty_signed_inclusion_list(&chain_spec)
+                )),
+                ForkName::Heze,
+                &chain_spec,
+            ),
+            Ok(Some(RpcSuccessResponse::InclusionListsByIndices(
+                empty_signed_inclusion_list(&chain_spec)
+            ))),
+        );
+    }
+
+    #[test]
+    fn inclusion_lists_by_indices_response_is_rejected_before_heze() {
+        let chain_spec = spec_with_all_forks_enabled();
+
+        // A pre-Heze slot produces a pre-Heze fork digest, so the response must be rejected.
+        let pre_heze = Arc::new(SignedInclusionList {
+            message: InclusionList {
+                slot: chain_spec
+                    .gloas_fork_epoch
+                    .expect("gloas fork epoch must be set")
+                    .start_slot(Spec::slots_per_epoch()),
+                ..InclusionList::default()
+            },
+            signature: Signature::empty(),
+        });
+
+        assert!(matches!(
+            encode_then_decode_response(
+                SupportedProtocol::InclusionListsByIndicesV1,
+                RpcResponse::Success(RpcSuccessResponse::InclusionListsByIndices(pre_heze)),
+                ForkName::Heze,
+                &chain_spec,
+            ),
+            Err(RPCError::ErrorResponse(RpcErrorResponse::InvalidRequest, _))
+        ));
     }
 
     // Test RPCResponse encoding/decoding for V1 messages
@@ -2054,6 +2156,7 @@ mod tests {
             RequestType::MetaData(MetadataRequest::new_v1()),
             RequestType::BlobsByRange(blbrange_request()),
             RequestType::DataColumnsByRange(dcbrange_request()),
+            RequestType::InclusionListsByIndices(ilbindices_request()),
             RequestType::MetaData(MetadataRequest::new_v2()),
             RequestType::BlocksByHead(BlocksByHeadRequest {
                 beacon_root: Hash256::zero(),
@@ -2163,14 +2266,13 @@ mod tests {
         // byte 1,2,3 are chunk length (little endian)
         let malicious_padding: &'static [u8] = b"\xFE\x00\x00\x00";
 
-        // Full altair block is 157916 bytes uncompressed. `max_compressed_len` is 32 + 157916 + 157916/6 = 184267.
         let block_message_bytes = altair_block(&fork_context.spec).as_ssz_bytes();
+        let max_compressed_len = snap::raw::max_compress_len(block_message_bytes.len());
 
-        assert_eq!(block_message_bytes.len(), 157916);
-        assert_eq!(
-            snap::raw::max_compress_len(block_message_bytes.len()),
-            184267
-        );
+        let mut writer = FrameEncoder::new(Vec::new());
+        writer.write_all(&block_message_bytes).unwrap();
+        writer.flush().unwrap();
+        let compressed_payload = writer.get_ref();
 
         let mut uvi_codec: Uvi<usize> = Uvi::default();
         let mut dst = BytesMut::with_capacity(1024);
@@ -2187,21 +2289,18 @@ mod tests {
         // Insert snappy stream identifier
         dst.extend_from_slice(stream_identifier);
 
-        // Insert malicious padding of 176156 bytes.
-        for _ in 0..44039 {
+        // Insert just enough malicious padding to push the message past `max_compressed_len`.
+        let padding_len = max_compressed_len - stream_identifier.len() - compressed_payload.len();
+        for _ in 0..padding_len / malicious_padding.len() + 1 {
             dst.extend_from_slice(malicious_padding);
         }
 
-        // Insert payload (8102 bytes compressed)
-        let mut writer = FrameEncoder::new(Vec::new());
-        writer.write_all(&block_message_bytes).unwrap();
-        writer.flush().unwrap();
-        assert_eq!(writer.get_ref().len(), 8102);
-        dst.extend_from_slice(writer.get_ref());
+        // Insert payload
+        dst.extend_from_slice(compressed_payload);
 
         let chain_spec = spec_with_all_forks_enabled();
 
-        // 10 (for stream identifier) + 176156 + 8103 = 184269 > `max_compressed_len`. Hence, decoding should fail with `InvalidData`.
+        // The message is longer than `max_compressed_len`, so decoding should fail with `InvalidData`.
         assert!(matches!(
             decode_response(
                 SupportedProtocol::BlocksByRangeV2,

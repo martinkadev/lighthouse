@@ -77,7 +77,7 @@ impl InvalidationOperation {
 }
 
 #[superstruct(
-    variants(V17, V29),
+    variants(V17, V29, V33),
     variant_attributes(derive(Clone, PartialEq, Debug, Encode, Decode, Serialize, Deserialize))
 )]
 #[derive(PartialEq, Debug, Encode, Decode, Serialize, Deserialize, Clone)]
@@ -105,9 +105,9 @@ pub struct ProtoNode {
     #[superstruct(getter(copy))]
     #[ssz(with = "four_byte_option_usize")]
     pub parent: Option<usize>,
-    #[superstruct(only(V17, V29), partial_getter(copy))]
+    #[superstruct(only(V17, V29, V33), partial_getter(copy))]
     pub justified_checkpoint: Checkpoint,
-    #[superstruct(only(V17, V29), partial_getter(copy))]
+    #[superstruct(only(V17, V29, V33), partial_getter(copy))]
     pub finalized_checkpoint: Checkpoint,
     #[superstruct(getter(copy))]
     pub weight: u64,
@@ -133,50 +133,54 @@ pub struct ProtoNode {
     pub unrealized_finalized_checkpoint: Option<Checkpoint>,
 
     /// We track the parent payload status from which the current node was extended.
-    #[superstruct(only(V29), partial_getter(copy))]
+    #[superstruct(only(V29, V33), partial_getter(copy))]
     pub parent_payload_status: ParentPayloadStatus,
-    #[superstruct(only(V29), partial_getter(copy))]
+    #[superstruct(only(V29, V33), partial_getter(copy))]
     pub empty_payload_weight: u64,
-    #[superstruct(only(V29), partial_getter(copy))]
+    #[superstruct(only(V29, V33), partial_getter(copy))]
     pub full_payload_weight: u64,
-    #[superstruct(only(V29), partial_getter(copy))]
+    #[superstruct(only(V29, V33), partial_getter(copy))]
     pub execution_payload_block_hash: ExecutionBlockHash,
-    #[superstruct(only(V29), partial_getter(copy))]
+    #[superstruct(only(V29, V33), partial_getter(copy))]
     pub execution_payload_parent_hash: ExecutionBlockHash,
     /// Equivalent to spec's `block_timeliness[root][ATTESTATION_TIMELINESS_INDEX]`.
-    #[superstruct(only(V29), partial_getter(copy))]
+    #[superstruct(only(V29, V33), partial_getter(copy))]
     pub block_timeliness_attestation_threshold: bool,
     /// Equivalent to spec's `block_timeliness[root][PTC_TIMELINESS_INDEX]`.
-    #[superstruct(only(V29), partial_getter(copy))]
+    #[superstruct(only(V29, V33), partial_getter(copy))]
     pub block_timeliness_ptc_threshold: bool,
     /// Equivalent to spec's `store.payload_timeliness_vote[root]`.
     /// PTC timeliness vote bitfield, indexed by PTC committee position.
     /// Bit i set means PTC member i voted `payload_present = true`.
     /// Tiebreak derived as: `num_set_bits() > ptc_size / 2`.
-    #[superstruct(only(V29))]
+    #[superstruct(only(V29, V33))]
     pub payload_timeliness_votes: BitVector<U512>,
     /// Equivalent to spec's `store.payload_data_availability_vote[root]`.
     /// PTC data availability vote bitfield, indexed by PTC committee position.
     /// Bit i set means PTC member i voted `blob_data_available = true`.
     /// Tiebreak derived as: `num_set_bits() > ptc_size / 2`.
-    #[superstruct(only(V29))]
+    #[superstruct(only(V29, V33))]
     pub payload_data_availability_votes: BitVector<U512>,
     /// Tracks which PTC members have cast a vote.
     /// Bit i set means PTC member i has submitted a payload attestation.
-    #[superstruct(only(V29))]
+    #[superstruct(only(V29, V33))]
     pub ptc_participation: BitVector<U512>,
     /// Whether the execution payload for this block has been received and validated locally.
     /// Maps to `root in store.payload_states` in the spec.
-    #[superstruct(only(V29), partial_getter(copy))]
+    #[superstruct(only(V29, V33), partial_getter(copy))]
     pub payload_received: bool,
+    /// Whether the execution payload satisfies the inclusion list constraints. Maps to
+    /// `store.payload_inclusion_list_satisfaction[root]` in the spec.
+    #[superstruct(only(V33), partial_getter(copy))]
+    pub payload_inclusion_list_satisfied: bool,
     /// The proposer index for this block, used by `should_apply_proposer_boost`
     /// to detect equivocations at the parent's slot.
-    #[superstruct(only(V29), partial_getter(copy))]
+    #[superstruct(only(V29, V33), partial_getter(copy))]
     pub proposer_index: u64,
     /// Weight from equivocating validators that voted for this block.
     /// Used by `is_head_weak` to match the spec's monotonicity guarantee:
     /// more attestations can only increase head weight, never decrease it.
-    #[superstruct(only(V29), partial_getter(copy))]
+    #[superstruct(only(V29, V33), partial_getter(copy))]
     pub equivocating_attestation_score: u64,
 }
 
@@ -192,7 +196,7 @@ pub enum ParentPayloadStatus {
 
 impl ProtoNode {
     pub fn is_gloas(&self) -> bool {
-        self.as_v29().is_ok()
+        self.as_v33().is_ok()
     }
 
     /// Generic version of spec's `parent_payload_status`. A pre-Gloas node has no parent payload
@@ -206,11 +210,16 @@ impl ProtoNode {
         self.get_parent_payload_status() == ParentPayloadStatus::Full
     }
 
+    /// The `FULL` node only exists if the payload has been received and not found invalid.
+    pub fn has_full_node(&self) -> bool {
+        self.payload_received().is_ok_and(|received| received) && !self.is_invalid()
+    }
+
     pub fn attestation_score(&self, payload_status: PayloadStatus) -> u64 {
         match payload_status {
             PayloadStatus::Pending => self.weight(),
             // Pre-Gloas (V17) nodes have no payload separation — all weight
-            // is in `weight()`. Post-Gloas (V29) nodes track per-status weights.
+            // is in `weight()`. Post-Gloas (V33) nodes track per-status weights.
             PayloadStatus::Empty => self
                 .empty_payload_weight()
                 .unwrap_or_else(|_| self.weight()),
@@ -242,6 +251,7 @@ impl ProtoNode {
                 ExecutionStatus::NotYetRevealed(hash) => PayloadBlockHash::Hash(hash),
             },
             ProtoNode::V29(node) => PayloadBlockHash::Hash(node.execution_payload_block_hash),
+            ProtoNode::V33(node) => PayloadBlockHash::Hash(node.execution_payload_block_hash),
         }
     }
 
@@ -250,7 +260,7 @@ impl ProtoNode {
     /// (or not `timely` when `timely` is `false`), taking into consideration local
     /// availability and PTC votes.
     pub fn payload_timeliness<E: EthSpec>(&self, timely: bool) -> Result<bool, Error> {
-        let Ok(node) = self.as_v29() else {
+        let Ok(node) = self.as_v33() else {
             return Err(Error::InvalidNodeVariant {
                 block_root: self.root(),
             });
@@ -260,6 +270,21 @@ impl ProtoNode {
         if !node.payload_received {
             return Ok(!timely);
         }
+
+        self.ptc_votes_timeliness::<E>(timely)
+    }
+
+    /// The PTC's verdict on payload timeliness, from votes alone.
+    ///
+    /// Unlike [`Self::payload_timeliness`] this does NOT consult local payload availability, so it
+    /// can answer "did the PTC see the payload?" even when this node never received it. Returns
+    /// whether more than `PAYLOAD_TIMELY_THRESHOLD` PTC members voted `timely`.
+    pub fn ptc_votes_timeliness<E: EthSpec>(&self, timely: bool) -> Result<bool, Error> {
+        let Ok(node) = self.as_v33() else {
+            return Err(Error::InvalidNodeVariant {
+                block_root: self.root(),
+            });
+        };
 
         let matching_votes = if timely {
             node.payload_timeliness_votes.num_set_bits()
@@ -278,7 +303,7 @@ impl ProtoNode {
     /// (or not, when `available` is `False`), taking into consideration local
     /// availability and PTC votes.
     pub fn payload_data_availability<E: EthSpec>(&self, available: bool) -> Result<bool, Error> {
-        let Ok(node) = self.as_v29() else {
+        let Ok(node) = self.as_v33() else {
             return Err(Error::InvalidNodeVariant {
                 block_root: self.root(),
             });
@@ -288,6 +313,22 @@ impl ProtoNode {
         if !node.payload_received {
             return Ok(!available);
         }
+
+        self.ptc_votes_data_availability::<E>(available)
+    }
+
+    /// The PTC's verdict on blob data availability, from votes alone.
+    ///
+    /// Unlike [`Self::payload_data_availability`] this does NOT consult local payload
+    /// availability, so it can answer "did the PTC see the data?" even when this node never
+    /// received the payload. Returns whether more than `DATA_AVAILABILITY_TIMELY_THRESHOLD`
+    /// PTC members voted `available`.
+    pub fn ptc_votes_data_availability<E: EthSpec>(&self, available: bool) -> Result<bool, Error> {
+        let Ok(node) = self.as_v33() else {
+            return Err(Error::InvalidNodeVariant {
+                block_root: self.root(),
+            });
+        };
 
         let matching_votes = if available {
             node.payload_data_availability_votes.num_set_bits()
@@ -490,6 +531,11 @@ impl ProtoArray {
                     }
                 }
                 ProtoNode::V29(node) => {
+                    return Err(Error::InvalidNodeVariant {
+                        block_root: node.root,
+                    });
+                }
+                ProtoNode::V33(node) => {
                     // The empty side and equivocation score stay live whatever the verdict.
                     node.equivocating_attestation_score = node
                         .equivocating_attestation_score
@@ -542,8 +588,8 @@ impl ProtoArray {
                 // based on the child's `parent_payload_status` (the ancestor path
                 // direction). If this child is on the FULL path from the parent,
                 // all weight supports the parent's FULL virtual node, and vice versa.
-                if let Ok(child_v29) = node.as_v29() {
-                    match child_v29.parent_payload_status {
+                if let Ok(child_v33) = node.as_v33() {
+                    match child_v33.parent_payload_status {
                         ParentPayloadStatus::Full => {
                             parent_delta.full_delta = parent_delta
                                 .full_delta
@@ -637,10 +683,15 @@ impl ProtoArray {
                 if let Some(parent_node) = parent_index.and_then(|idx| self.nodes.get(idx)) {
                     match parent_node {
                         ProtoNode::V29(v29) => {
+                            return Err(Error::InvalidNodeVariant {
+                                block_root: v29.root,
+                            });
+                        }
+                        ProtoNode::V33(v33) => {
                             // Both parent and child are Gloas blocks. The parent is full if the
                             // block hash in the parent node matches the parent block hash in the
                             // child bid.
-                            if execution_payload_parent_hash == v29.execution_payload_block_hash {
+                            if execution_payload_parent_hash == v33.execution_payload_block_hash {
                                 ParentPayloadStatus::Full
                             } else {
                                 ParentPayloadStatus::Empty
@@ -664,7 +715,7 @@ impl ProtoArray {
             // adds the anchor to `store.payloads`, so it is never considered full.
             let is_anchor = parent_index.is_none();
 
-            ProtoNode::V29(ProtoNodeV29 {
+            ProtoNode::V33(ProtoNodeV33 {
                 slot: block.slot,
                 root: block.root,
                 target_root: block.target_root,
@@ -687,6 +738,7 @@ impl ProtoArray {
                 payload_data_availability_votes: BitVector::default(),
                 ptc_participation: BitVector::default(),
                 payload_received: false,
+                payload_inclusion_list_satisfied: true,
                 proposer_index,
                 // Spec: `record_block_timeliness` + `get_forkchoice_store`.
                 // Anchor gets [True, True]. Others computed from time_into_slot.
@@ -694,7 +746,8 @@ impl ProtoArray {
                     || (is_current_slot
                         && time_into_slot < spec.get_attestation_due::<E>(current_slot)),
                 block_timeliness_ptc_threshold: is_anchor
-                    || (is_current_slot && time_into_slot < spec.get_payload_attestation_due()),
+                    || (is_current_slot
+                        && time_into_slot < spec.get_payload_attestation_due::<E>(current_slot)),
                 equivocating_attestation_score: 0,
             })
         };
@@ -718,7 +771,7 @@ impl ProtoArray {
 
             // A Gloas block builds on the payload its bid names: its parent's own on a `FULL`
             // edge, an older one on an `EMPTY` edge.
-            if let Ok(gloas_node) = node.as_v29()
+            if let Ok(gloas_node) = node.as_v33()
                 && self.is_payload_invalid(&gloas_node.execution_payload_parent_hash)
             {
                 return Err(Error::ParentExecutionStatusIsInvalid {
@@ -849,11 +902,13 @@ impl ProtoArray {
 
     /// Record the execution layer's verdict for a Gloas block's payload envelope.
     ///
-    /// Sets `payload_received` to true whatever the verdict.
+    /// Sets `payload_received` to true whatever the verdict, and records whether the payload
+    /// satisfies the inclusion list constraints.
     pub fn on_payload_envelope_received(
         &mut self,
         block_root: Hash256,
         execution_status: ExecutionStatus,
+        inclusion_list_satisfied: bool,
     ) -> Result<(), Error> {
         let index = *self
             .indices
@@ -863,15 +918,16 @@ impl ProtoArray {
             .nodes
             .get_mut(index)
             .ok_or(Error::InvalidNodeIndex(index))?;
-        let v29 = node
-            .as_v29_mut()
+        let v33 = node
+            .as_v33_mut()
             .map_err(|_| Error::InvalidNodeVariant { block_root })?;
         // The envelope arrived: record it so sync stops fetching, whatever the verdict.
-        v29.payload_received = true;
+        v33.payload_received = true;
+        v33.payload_inclusion_list_satisfied = inclusion_list_satisfied;
 
         // A settled verdict is never revisited: a duplicate `Valid`, or an `Invalid` the
         // invalidation sweep already set from this payload's condemned ancestry.
-        match v29.execution_status {
+        match v33.execution_status {
             ExecutionStatus::NotYetRevealed(_) | ExecutionStatus::Optimistic(_) => {}
             ExecutionStatus::Valid(_) | ExecutionStatus::Invalid(_) => return Ok(()),
             ExecutionStatus::Irrelevant(_) => {
@@ -884,7 +940,7 @@ impl ProtoArray {
         // Store the EL's verdict; only `Valid` also validates the branch this payload executed.
         match execution_status {
             ExecutionStatus::Optimistic(_) => {
-                v29.execution_status = execution_status;
+                v33.execution_status = execution_status;
                 Ok(())
             }
             ExecutionStatus::Valid(_) => {
@@ -935,7 +991,7 @@ impl ProtoArray {
                 .ok_or(Error::InvalidNodeIndex(index))?
             {
                 ProtoNode::V17(_) => ParentPayloadStatus::PreGloas,
-                ProtoNode::V29(_) => ParentPayloadStatus::Full,
+                ProtoNode::V29(_) | ProtoNode::V33(_) => ParentPayloadStatus::Full,
             };
             self.propagate_execution_payload_validation_from(index, start_status)?;
         }
@@ -1261,19 +1317,19 @@ impl ProtoArray {
         Ok(())
     }
 
-    /// Spec: `get_filtered_block_tree`.
+    /// Spec: `get_filtered_node_tree`.
     ///
-    /// Returns the set of node indices on viable branches — those with at least
-    /// one leaf descendant with correct justified/finalized checkpoints.
-    fn get_filtered_block_tree<E: EthSpec>(
+    /// Returns the set of `(node index, payload status)` pairs on viable branches — those with at
+    /// least one leaf descendant with correct justified/finalized checkpoints.
+    fn get_filtered_node_tree<E: EthSpec>(
         &self,
         start_index: usize,
         current_slot: Slot,
         best_justified_checkpoint: Checkpoint,
         best_finalized_checkpoint: Checkpoint,
-    ) -> Result<HashSet<usize>, Error> {
+    ) -> Result<HashSet<(usize, PayloadStatus)>, Error> {
         let mut viable = HashSet::new();
-        self.filter_block_tree::<E>(
+        self.filter_node_tree::<E>(
             start_index,
             current_slot,
             best_justified_checkpoint,
@@ -1283,7 +1339,7 @@ impl ProtoArray {
         Ok(viable)
     }
 
-    /// Spec: `filter_block_tree`.
+    /// Spec: `filter_node_tree`.
     ///
     /// Proto_array stores nodes in insertion order — children always have higher
     /// indices than their parents. A single reverse pass therefore processes every
@@ -1294,15 +1350,15 @@ impl ProtoArray {
     /// `store.blocks` before running. We replicate that here with a forward pass
     /// propagating `excluded` from parent to child.
     ///
-    /// This pass keeps one boolean for each block. A Gloas block whose own payload is invalid
-    /// stays: only its `FULL` node is dead, and `get_node_children` drops it.
-    fn filter_block_tree<E: EthSpec>(
+    /// A Gloas block whose own payload is invalid stays: only its `FULL` node is dead, and
+    /// `get_node_children` drops it.
+    fn filter_node_tree<E: EthSpec>(
         &self,
         start_index: usize,
         current_slot: Slot,
         best_justified_checkpoint: Checkpoint,
         best_finalized_checkpoint: Checkpoint,
-        viable: &mut HashSet<usize>,
+        viable: &mut HashSet<(usize, PayloadStatus)>,
     ) -> Result<(), Error> {
         // Forward pass: a node is "excluded" if its latest payload (or that of any ancestor down
         // to `start_index`) is invalid.
@@ -1328,7 +1384,12 @@ impl ProtoArray {
             // post-Gloas the one its bid names.
             let latest_payload_invalid = match node {
                 ProtoNode::V17(_) => node.is_invalid(),
-                ProtoNode::V29(gloas_node) => {
+                ProtoNode::V29(v29) => {
+                    return Err(Error::InvalidNodeVariant {
+                        block_root: v29.root,
+                    });
+                }
+                ProtoNode::V33(gloas_node) => {
                     invalid_payloads.contains(&gloas_node.execution_payload_parent_hash)
                 }
             };
@@ -1348,35 +1409,60 @@ impl ProtoArray {
                 .get(node_index)
                 .ok_or(Error::InvalidNodeIndex(node_index))?;
 
-            // Spec: children = [root for root in blocks if blocks[root].parent_root == block_root]
-            let valid_children: Vec<usize> = self
+            // Spec: `get_node_children` of the `EMPTY` and `FULL` nodes.
+            let mut empty_children = vec![];
+            let mut full_children = vec![];
+            for &child_index in self
                 .children
                 .get(node_index)
                 .ok_or(Error::InvalidNodeIndex(node_index))?
-                .iter()
-                .copied()
-                .filter_map(|i| match excluded.get(i) {
-                    Some(false) => Some(Ok(i)),
-                    Some(true) => None,
-                    None => Some(Err(Error::InvalidNodeIndex(i))),
-                })
-                .collect::<Result<_, _>>()?;
+            {
+                if *excluded
+                    .get(child_index)
+                    .ok_or(Error::InvalidNodeIndex(child_index))?
+                {
+                    continue;
+                }
+                let child = self
+                    .nodes
+                    .get(child_index)
+                    .ok_or(Error::InvalidNodeIndex(child_index))?;
+                match child.get_parent_payload_status() {
+                    ParentPayloadStatus::Full => full_children.push(child_index),
+                    ParentPayloadStatus::Empty | ParentPayloadStatus::PreGloas => {
+                        empty_children.push(child_index)
+                    }
+                }
+            }
 
-            if !valid_children.is_empty() {
-                // Spec: if any(children): if any(filter_block_tree_result): blocks[block_root] = block
-                if valid_children.iter().any(|c| viable.contains(c)) {
-                    viable.insert(node_index);
+            let is_viable = |children: &[usize]| {
+                if children.is_empty() {
+                    // Spec: leaf — check correct_justified and correct_finalized
+                    self.node_is_viable_for_head::<E>(
+                        node,
+                        current_slot,
+                        best_justified_checkpoint,
+                        best_finalized_checkpoint,
+                    )
+                } else {
+                    children
+                        .iter()
+                        .any(|&i| viable.contains(&(i, PayloadStatus::Pending)))
                 }
-            } else {
-                // Spec: leaf — check correct_justified and correct_finalized
-                if self.node_is_viable_for_head::<E>(
-                    node,
-                    current_slot,
-                    best_justified_checkpoint,
-                    best_finalized_checkpoint,
-                ) {
-                    viable.insert(node_index);
-                }
+            };
+
+            let empty_viable = is_viable(&empty_children);
+            let full_viable = node.has_full_node() && is_viable(&full_children);
+
+            if empty_viable {
+                viable.insert((node_index, PayloadStatus::Empty));
+            }
+            if full_viable {
+                viable.insert((node_index, PayloadStatus::Full));
+            }
+            // A `PENDING` node always has an `EMPTY` child, so it is never a leaf.
+            if empty_viable || full_viable {
+                viable.insert((node_index, PayloadStatus::Pending));
             }
         }
         Ok(())
@@ -1400,28 +1486,31 @@ impl ProtoArray {
             payload_status: PayloadStatus::Pending,
         };
 
-        // Spec: `get_filtered_block_tree`.
-        let viable_nodes = self.get_filtered_block_tree::<E>(
+        // Spec: `get_filtered_node_tree`.
+        let viable_nodes = self.get_filtered_node_tree::<E>(
             start_index,
             current_slot,
             best_justified_checkpoint,
             best_finalized_checkpoint,
         )?;
 
+        // `viable_nodes` also holds nodes outside the justified subtree.
+        if !viable_nodes.contains(&(start_index, PayloadStatus::Pending)) {
+            return Ok(head.with_status(PayloadStatus::Empty));
+        }
+
         // Compute once rather than per-child per-level.
         let apply_proposer_boost =
             self.should_apply_proposer_boost::<E>(proposer_boost_root, justified_balances, spec)?;
 
         loop {
-            let children: Vec<_> = if head.payload_status == PayloadStatus::Pending {
-                // Spec: `get_node_children` does not consult `get_filtered_block_tree` for PENDING.
-                self.get_node_children(&head)?
-            } else {
-                self.get_node_children(&head)?
-                    .into_iter()
-                    .filter(|(fc_node, _)| viable_nodes.contains(&fc_node.proto_node_index))
-                    .collect()
-            };
+            let children: Vec<_> = self
+                .get_node_children(&head)?
+                .into_iter()
+                .filter(|(child, _)| {
+                    viable_nodes.contains(&(child.proto_node_index, child.payload_status))
+                })
+                .collect();
 
             if children.is_empty() {
                 return Ok(head);
@@ -1457,12 +1546,12 @@ impl ProtoArray {
         }
     }
 
-    /// Returns every leaf node in the filtered block tree, along with its fork-choice weight.
+    /// Returns every leaf node in the filtered node tree, along with its fork-choice weight.
     ///
     /// This is similar to `find_head_walk`, except it walks every viable branch instead of taking
     /// the maximum child at each step. Only used in fork choice compliance tests.
     #[allow(clippy::too_many_arguments)]
-    pub fn filtered_block_tree_leaves_and_weights<E: EthSpec>(
+    pub fn filtered_node_tree_leaves_and_weights<E: EthSpec>(
         &self,
         justified_root: &Hash256,
         current_slot: Slot,
@@ -1478,7 +1567,7 @@ impl ProtoArray {
             .copied()
             .ok_or(Error::NodeUnknown(*justified_root))?;
 
-        let viable_nodes = self.get_filtered_block_tree::<E>(
+        let viable_nodes = self.get_filtered_node_tree::<E>(
             start_index,
             current_slot,
             justified_checkpoint,
@@ -1501,14 +1590,13 @@ impl ProtoArray {
                 .get(fc_node.proto_node_index)
                 .ok_or(Error::InvalidNodeIndex(fc_node.proto_node_index))?;
 
-            let children: Vec<_> = if fc_node.payload_status == PayloadStatus::Pending {
-                self.get_node_children(&fc_node)?
-            } else {
-                self.get_node_children(&fc_node)?
-                    .into_iter()
-                    .filter(|(child, _)| viable_nodes.contains(&child.proto_node_index))
-                    .collect()
-            };
+            let children: Vec<_> = self
+                .get_node_children(&fc_node)?
+                .into_iter()
+                .filter(|(child, _)| {
+                    viable_nodes.contains(&(child.proto_node_index, child.payload_status))
+                })
+                .collect();
 
             if children.is_empty() {
                 let leaf_node = if proto_node.payload_received().is_err() {
@@ -1574,8 +1662,14 @@ impl ProtoArray {
         let executed_node = loop {
             // A pre-Gloas (V17) block carries its payload inside the block, so a V17 node ran its
             // own payload — it is the executed node.
-            let ProtoNode::V29(gloas_node) = node else {
-                break node;
+            let gloas_node = match node {
+                ProtoNode::V17(_) => break node,
+                ProtoNode::V29(v29) => {
+                    return Err(Error::InvalidNodeVariant {
+                        block_root: v29.root,
+                    });
+                }
+                ProtoNode::V33(gloas_node) => gloas_node,
             };
 
             // Reached the array root (the finalized block or an ancestor): VALID by definition.
@@ -1830,11 +1924,7 @@ impl ProtoArray {
                 .get(node.proto_node_index)
                 .ok_or(Error::InvalidNodeIndex(node.proto_node_index))?;
             let mut children = vec![(node.with_status(PayloadStatus::Empty), proto_node.clone())];
-            // The FULL virtual child only exists if the payload has been received and not found
-            // invalid.
-            if proto_node.payload_received().is_ok_and(|received| received)
-                && !proto_node.is_invalid()
-            {
+            if proto_node.has_full_node() {
                 children.push((node.with_status(PayloadStatus::Full), proto_node.clone()));
             }
             Ok(children)
@@ -1957,7 +2047,7 @@ impl ProtoArray {
             });
         }
 
-        let Ok(node) = proto_node.as_v29() else {
+        let Ok(node) = proto_node.as_v33() else {
             return Err(Error::InvalidNodeVariant {
                 block_root: fc_node.root,
             });
@@ -1965,6 +2055,11 @@ impl ProtoArray {
 
         // Spec equivalent to `if not is_payload_verified(store, root): return False`
         if !node.payload_received {
+            return Ok(false);
+        }
+
+        // Spec: `is_payload_inclusion_list_satisfied`.
+        if !node.payload_inclusion_list_satisfied {
             return Ok(false);
         }
 
@@ -2067,9 +2162,9 @@ impl ProtoArray {
         Ok(())
     }
 
-    /// This is the equivalent to the `filter_block_tree` function in the eth2 spec:
+    /// This is the leaf check in the `filter_node_tree` function in the spec:
     ///
-    /// https://github.com/ethereum/eth2.0-specs/blob/v0.10.0/specs/phase0/fork-choice.md#filter_block_tree
+    /// https://github.com/ethereum/consensus-specs/blob/v1.7.0-beta.3/specs/phase0/fork-choice.md#filter_node_tree
     ///
     /// Any node that has a different finalized or justified epoch should not be viable for the
     /// head.
