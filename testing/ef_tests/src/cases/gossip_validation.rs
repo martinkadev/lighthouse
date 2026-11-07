@@ -5,7 +5,7 @@ use crate::type_name::TypeName;
 use ::fork_choice::InvalidationOperation;
 use beacon_chain::block_verification_types::LookupBlock;
 use beacon_chain::data_column_verification::{
-    GossipPartialDataColumnError, PartialColumnVerificationResult,
+    GossipDataColumnError, GossipPartialDataColumnError, PartialColumnVerificationResult,
 };
 use beacon_chain::slot_clock::{SlotClock, TestingSlotClock};
 use beacon_chain::test_utils::{BeaconChainHarness, EphemeralHarnessType};
@@ -26,8 +26,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use types::data::{
-    DataColumnSidecar, DataColumnSubnetId, PartialDataColumnGloas, PartialDataColumnGroupId,
-    PartialDataColumnSidecarGloas,
+    DataColumnSidecar, DataColumnSubnetId, PartialDataColumn, PartialDataColumnFulu,
+    PartialDataColumnGloas, PartialDataColumnGroupId, PartialDataColumnHeader,
+    PartialDataColumnSidecarFulu, PartialDataColumnSidecarGloas,
 };
 use types::{
     AttesterSlashing, BeaconBlock, BeaconState, BlobSchedule, BlockImportSource, ChainSpec,
@@ -67,11 +68,19 @@ struct Meta {
     #[serde(default)]
     blocks: Vec<SetupBlock>,
     #[serde(default)]
+    seen_partial_data_column_headers: Vec<SeenPartialDataColumnHeader>,
+    #[serde(default)]
     finalized_checkpoint: Option<FinalizedCheckpoint>,
     #[serde(default)]
     messages: Vec<MessageMeta>,
     #[serde(default)]
     bls_setting: Option<BlsSetting>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SeenPartialDataColumnHeader {
+    block_root: Hash256,
+    header: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -271,6 +280,20 @@ impl<E: EthSpec> GossipTester<E> {
             tester.block_on_dangerous(tester.harness.chain.recompute_head_at_current_slot())?;
         }
         tester.set_finalized_checkpoint(case.finalized_checkpoint(&blocks)?)?;
+        if !case.meta.seen_partial_data_column_headers.is_empty() {
+            let assembler = tester
+                .harness
+                .chain
+                .data_availability_checker
+                .partial_assembler()
+                .ok_or_else(|| Error::InternalError("partial-column assembler disabled".into()))?;
+            for seen in &case.meta.seen_partial_data_column_headers {
+                let header = ssz_decode_file::<PartialDataColumnHeader<E>>(
+                    &case.path.join(format!("{}.ssz_snappy", seen.header)),
+                )?;
+                assembler.init(seen.block_root, Arc::new(header));
+            }
+        }
         // This fixture does not serialize its reference Seen set. Reconstruct the
         // prior observation through the operation pool before delivering the message.
         for message in &case.meta.messages {
@@ -440,6 +463,87 @@ impl<E: EthSpec> GossipTester<E> {
         Ok(())
     }
 
+    fn process_partial_data_column(
+        &self,
+        path: &Path,
+        message: &MessageMeta,
+        fork: ForkName,
+    ) -> Result<MessageAcceptance, Error> {
+        let group = message
+            .group_id
+            .as_ref()
+            .ok_or_else(|| Error::FailedToParseTest("missing partial group ID".into()))?;
+        let group_path = path.join(format!("{group}.ssz_snappy"));
+        let sidecar_path = path.join(format!("{}.ssz_snappy", message.message));
+        let index = message
+            .column_index
+            .ok_or_else(|| Error::FailedToParseTest("missing partial column index".into()))?;
+        let column: PartialDataColumn<E> = if fork.gloas_enabled() {
+            let group: PartialDataColumnGroupId = ssz_decode_file(&group_path)?;
+            PartialDataColumnGloas {
+                block_root: group.beacon_block_root,
+                slot: group.slot,
+                index,
+                sidecar: ssz_decode_file::<PartialDataColumnSidecarGloas<E>>(&sidecar_path)?,
+            }
+            .into()
+        } else {
+            PartialDataColumnFulu {
+                block_root: ssz_decode_file(&group_path)?,
+                index,
+                sidecar: ssz_decode_file::<PartialDataColumnSidecarFulu<E>>(&sidecar_path)?,
+            }
+            .into()
+        };
+        let seen_timestamp = self.set_message_time(message)?;
+        let result = self.block_on_dangerous(
+            self.harness
+                .chain
+                .verify_partial_data_column_sidecar_for_gossip(Box::new(column), seen_timestamp),
+        )?;
+        let error = match result {
+            PartialColumnVerificationResult::Ok(_)
+            | PartialColumnVerificationResult::ErrWithValidHeader {
+                err:
+                    GossipPartialDataColumnError::GossipDataColumnError(
+                        GossipDataColumnError::PriorKnownUnpublished,
+                    ),
+                ..
+            } => return Ok(MessageAcceptance::Accept),
+            PartialColumnVerificationResult::Err(error)
+            | PartialColumnVerificationResult::ErrWithValidHeader { err: error, .. } => error,
+        };
+        match error {
+            GossipPartialDataColumnError::MissingHeader
+            | GossipPartialDataColumnError::GossipDataColumnError(
+                GossipDataColumnError::ParentUnknown { .. }
+                | GossipDataColumnError::BlockRootUnknown { .. }
+                | GossipDataColumnError::FutureSlot { .. }
+                | GossipDataColumnError::PastFinalizedSlot { .. },
+            ) => Ok(MessageAcceptance::Ignore),
+            GossipPartialDataColumnError::HeaderMismatches
+            | GossipPartialDataColumnError::HeaderIncorrectRoot { .. }
+            | GossipPartialDataColumnError::InconsistentPresentCount { .. }
+            | GossipPartialDataColumnError::InconsistentCommitmentsLength { .. }
+            | GossipPartialDataColumnError::EmptyMessage
+            | GossipPartialDataColumnError::IncorrectSlot { .. }
+            | GossipPartialDataColumnError::GossipDataColumnError(
+                GossipDataColumnError::KnownInvalidBlock { .. }
+                | GossipDataColumnError::InvalidKzgProof { .. }
+                | GossipDataColumnError::InvalidInclusionProof
+                | GossipDataColumnError::UnknownValidator(_)
+                | GossipDataColumnError::ProposalSignatureInvalid
+                | GossipDataColumnError::ProposerIndexMismatch { .. }
+                | GossipDataColumnError::IsNotLaterThanParent { .. }
+                | GossipDataColumnError::NotFinalizedDescendant { .. }
+                | GossipDataColumnError::UnexpectedDataColumn,
+            ) => Ok(MessageAcceptance::Reject),
+            error => Err(Error::InternalError(format!(
+                "partial verification: {error:?}"
+            ))),
+        }
+    }
+
     fn validate_message(
         &self,
         path: &Path,
@@ -560,47 +664,7 @@ impl<E: EthSpec> GossipTester<E> {
                 )?;
             }
             Topic::PartialDataColumnSidecar => {
-                let group: PartialDataColumnGroupId = ssz_decode_file(&path.join(format!(
-                    "{}.ssz_snappy",
-                    message_meta.group_id.as_ref().ok_or_else(|| {
-                        Error::FailedToParseTest("missing partial group ID".into())
-                    })?
-                )))?;
-                let sidecar: PartialDataColumnSidecarGloas<E> =
-                    ssz_decode_file(&path.join(format!("{}.ssz_snappy", message_meta.message)))?;
-                let column = PartialDataColumnGloas {
-                    block_root: group.beacon_block_root,
-                    slot: group.slot,
-                    index: message_meta.column_index.ok_or_else(|| {
-                        Error::FailedToParseTest("missing partial column index".into())
-                    })?,
-                    sidecar,
-                };
-                let seen_timestamp = self.set_message_time(message_meta)?;
-                let result = self.block_on_dangerous(
-                    self.harness
-                        .chain
-                        .verify_partial_data_column_sidecar_for_gossip(
-                            Box::new(column.into()),
-                            seen_timestamp,
-                        ),
-                )?;
-                return match result {
-                    PartialColumnVerificationResult::Ok(_) => Ok(MessageAcceptance::Accept),
-                    PartialColumnVerificationResult::Err(
-                        GossipPartialDataColumnError::GossipDataColumnError(beacon_chain::data_column_verification::GossipDataColumnError::InvalidKzgProof { .. })
-                        | GossipPartialDataColumnError::InconsistentPresentCount { .. }
-                        | GossipPartialDataColumnError::InconsistentCommitmentsLength { .. }
-                        | GossipPartialDataColumnError::EmptyMessage
-                        | GossipPartialDataColumnError::IncorrectSlot { .. },
-                    ) => Ok(MessageAcceptance::Reject),
-                    PartialColumnVerificationResult::Err(error)
-                    | PartialColumnVerificationResult::ErrWithValidHeader { err: error, .. } => {
-                        Err(Error::InternalError(format!(
-                            "partial verification: {error:?}"
-                        )))
-                    }
-                };
+                return self.process_partial_data_column(path, message_meta, fork_name);
             }
             Topic::ExecutionPayloadBid => {
                 let bid = ssz_decode_file_with(

@@ -1323,6 +1323,9 @@ fn validate_partial_data_column_sidecar_for_gossip_fulu<T: BeaconChainTypes>(
 
     // Remove the header (if any) to avoid wasted memory.
     let header = column.sidecar.header.take();
+    if header.is_none() && column.sidecar.column.is_empty() {
+        return PartialColumnVerificationResult::Err(GossipPartialDataColumnError::EmptyMessage);
+    }
 
     let header = if let Some(header) = header {
         // Header was sent, so it is required to be valid
@@ -1349,16 +1352,16 @@ fn validate_partial_data_column_sidecar_for_gossip_fulu<T: BeaconChainTypes>(
             );
         };
 
-        // If there was no header, there must be at least one cell.
-        if column.sidecar.column.is_empty() {
-            return PartialColumnVerificationResult::ErrWithValidHeader {
-                err: GossipPartialDataColumnError::EmptyMessage,
-                header,
-            };
-        }
-
         header
     };
+
+    // The slot may have become finalized since the header was cached.
+    let slot = header.as_header().slot();
+    if let Err(err) = verify_sidecar_not_from_future_slot(chain, slot)
+        .and_then(|()| verify_slot_greater_than_latest_finalized_slot(chain, slot))
+    {
+        return PartialColumnVerificationResult::Err(err.into());
+    }
 
     match validate_partial_data_column_common(
         PartialDataColumnRef::Fulu(&column),
