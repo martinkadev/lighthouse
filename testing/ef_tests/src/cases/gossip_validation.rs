@@ -318,7 +318,21 @@ impl<E: EthSpec> GossipTester<E> {
                         .iter()
                         .filter(|setup| setup.failed)
                         .filter_map(|setup| {
-                            blocks.get(&setup.block).map(|block| block.canonical_root())
+                            let block = blocks.get(&setup.block)?;
+                            let fork = spec.fork_name_at_slot::<E>(block.slot());
+                            // Before Gloas a consensus-failed parent with a processed payload
+                            // is ignored. Leave it unimported and let gossip handle the missing
+                            // parent without putting it on the explicit rejection list.
+                            if case.meta.topic == Topic::BeaconBlock
+                                && !fork.gloas_enabled()
+                                && matches!(
+                                    setup.payload_status,
+                                    Some(PayloadStatus::Valid | PayloadStatus::Invalidated)
+                                )
+                            {
+                                return None;
+                            }
+                            Some(block.canonical_root())
                         })
                         .collect(),
                     verify_envelope_payload_hash_on_cl: false,

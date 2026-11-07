@@ -1720,11 +1720,19 @@ fn verify_parent_block_and_finalized_descendant<T: BeaconChainTypes>(
     slot: Slot,
     chain: &BeaconChain<T>,
 ) -> Result<ProtoBlock, GossipDataColumnError> {
+    if chain
+        .config
+        .invalid_block_roots
+        .contains(&block_parent_root)
+    {
+        return Err(GossipDataColumnError::KnownInvalidBlock {
+            block_root: block_parent_root,
+        });
+    }
     let fork_choice = chain.canonical_head.fork_choice_read_lock();
 
-    // We have already verified that the column is past finalization, so we can
-    // just check fork choice for the block's parent.
-    let Some(parent_block) = fork_choice.get_block(&block_parent_root) else {
+    // Include retained blocks outside the finalized chain so we can reject them below.
+    let Some(parent_block) = fork_choice.get_retained_block(&block_parent_root) else {
         return Err(GossipDataColumnError::ParentUnknown {
             parent_root: block_parent_root,
             slot,

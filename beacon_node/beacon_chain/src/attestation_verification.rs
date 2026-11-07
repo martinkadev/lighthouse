@@ -637,6 +637,7 @@ impl<'a, T: BeaconChainTypes> IndexedAggregatedAttestation<'a, T> {
                 chain,
                 attestation.data(),
                 head_block.payload_received,
+                fork_name,
             )?;
         }
 
@@ -976,6 +977,7 @@ impl<'a, T: BeaconChainTypes> IndexedUnaggregatedAttestation<'a, T> {
                 chain,
                 &attestation.data,
                 head_block.payload_received,
+                fork_name,
             )?;
         }
 
@@ -1244,10 +1246,14 @@ fn verify_attested_execution_payload<T: BeaconChainTypes>(
     chain: &BeaconChain<T>,
     data: &AttestationData,
     payload_received: bool,
+    fork: ForkName,
 ) -> Result<(), Error> {
     let beacon_block_root = data.beacon_block_root;
     if !payload_received {
         return Err(Error::UnknownPayloadEnvelope { beacon_block_root });
+    }
+    if !fork.eip8321_enabled() {
+        return Ok(());
     }
     match chain
         .canonical_head
