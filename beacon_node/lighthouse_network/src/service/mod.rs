@@ -850,7 +850,7 @@ impl<E: EthSpec> Network<E> {
     /// Publishes a list of messages on the pubsub (gossipsub) behaviour, choosing the encoding.
     pub fn publish(&mut self, messages: Vec<PubsubMessage<E>>) {
         for message in messages {
-            for topic in message.topics(GossipEncoding::default(), self.enr_fork_id.fork_digest) {
+            for topic in message.topics(GossipEncoding::default(), &self.fork_context) {
                 let message_data = message.encode(GossipEncoding::default());
                 if let Err(e) = self
                     .gossipsub_mut()
@@ -926,10 +926,15 @@ impl<E: EthSpec> Network<E> {
             };
             let subnet =
                 DataColumnSubnetId::from_column_index(*column.index(), &self.fork_context.spec);
+            let slot = match &message {
+                PubsubPartialMessage::DataColumnFulu { header, .. } => header.slot(),
+                PubsubPartialMessage::DataColumnGloas { column, .. } => column.slot,
+            };
             let topic = GossipTopic::new(
                 GossipKind::DataColumnSidecar(subnet),
                 GossipEncoding::default(),
-                self.enr_fork_id.fork_digest,
+                self.fork_context
+                    .context_bytes(slot.epoch(E::slots_per_epoch())),
             );
             let publish_topic: Topic = topic.clone().into();
 
