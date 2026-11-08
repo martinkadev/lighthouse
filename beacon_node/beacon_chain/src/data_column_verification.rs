@@ -135,6 +135,8 @@ pub enum GossipDataColumnError {
     ///
     /// We cannot process the column without the referenced block, the peer isn't necessarily faulty.
     BlockRootUnknown { block_root: Hash256, slot: Slot },
+    /// The sidecar references a known-invalid beacon block.
+    KnownInvalidBlock { block_root: Hash256 },
     /// The data column slot does not match its referenced block slot.
     ///
     /// ## Peer scoring
@@ -1238,6 +1240,15 @@ pub fn validate_data_column_sidecar_for_gossip_gloas<
     verify_slot_greater_than_latest_finalized_slot(chain, column_slot)?;
     verify_is_unknown_sidecar(chain, &data_column)?;
 
+    if chain
+        .config
+        .invalid_block_roots
+        .contains(&data_column.block_root())
+    {
+        return Err(GossipDataColumnError::KnownInvalidBlock {
+            block_root: data_column.block_root(),
+        });
+    }
     let bid = load_gloas_payload_bid(data_column.block_root(), chain)?.ok_or(
         GossipDataColumnError::BlockRootUnknown {
             block_root: data_column.block_root(),
@@ -1312,7 +1323,6 @@ fn validate_partial_data_column_sidecar_for_gossip_fulu<T: BeaconChainTypes>(
 
     // Remove the header (if any) to avoid wasted memory.
     let header = column.sidecar.header.take();
-
     let header = if let Some(header) = header {
         // Header was sent, so it is required to be valid
         match chain.verify_partial_data_column_header_for_gossip(block_root, header) {
@@ -1333,12 +1343,13 @@ fn validate_partial_data_column_sidecar_for_gossip_fulu<T: BeaconChainTypes>(
             .get_header(&block_root)
             .map(GossipVerifiedPartialDataColumnHeader::new_from_cached)
         else {
-            return PartialColumnVerificationResult::Err(
-                GossipPartialDataColumnError::MissingHeader,
-            );
+            let error = if column.sidecar.column.is_empty() {
+                GossipPartialDataColumnError::EmptyMessage
+            } else {
+                GossipPartialDataColumnError::MissingHeader
+            };
+            return PartialColumnVerificationResult::Err(error);
         };
-
-        // If there was no header, there must be at least one cell.
         if column.sidecar.column.is_empty() {
             return PartialColumnVerificationResult::ErrWithValidHeader {
                 err: GossipPartialDataColumnError::EmptyMessage,
@@ -1348,6 +1359,14 @@ fn validate_partial_data_column_sidecar_for_gossip_fulu<T: BeaconChainTypes>(
 
         header
     };
+
+    // The slot may have become finalized since the header was cached.
+    let slot = header.as_header().slot();
+    if let Err(err) = verify_sidecar_not_from_future_slot(chain, slot)
+        .and_then(|()| verify_slot_greater_than_latest_finalized_slot(chain, slot))
+    {
+        return PartialColumnVerificationResult::Err(err.into());
+    }
 
     match validate_partial_data_column_common(
         PartialDataColumnRef::Fulu(&column),
@@ -1709,11 +1728,19 @@ fn verify_parent_block_and_finalized_descendant<T: BeaconChainTypes>(
     slot: Slot,
     chain: &BeaconChain<T>,
 ) -> Result<ProtoBlock, GossipDataColumnError> {
+    if chain
+        .config
+        .invalid_block_roots
+        .contains(&block_parent_root)
+    {
+        return Err(GossipDataColumnError::KnownInvalidBlock {
+            block_root: block_parent_root,
+        });
+    }
     let fork_choice = chain.canonical_head.fork_choice_read_lock();
 
-    // We have already verified that the column is past finalization, so we can
-    // just check fork choice for the block's parent.
-    let Some(parent_block) = fork_choice.get_block(&block_parent_root) else {
+    // Include retained blocks outside the finalized chain so we can reject them below.
+    let Some(parent_block) = fork_choice.get_retained_block(&block_parent_root) else {
         return Err(GossipDataColumnError::ParentUnknown {
             parent_root: block_parent_root,
             slot,

@@ -13,8 +13,9 @@ use types::{
     IndexedAttestation, IndexedAttestationRef, IndexedPayloadAttestation, ProposerSlashing,
     SignedAggregateAndProof, SignedBeaconBlock, SignedBeaconBlockHeader,
     SignedBlsToExecutionChange, SignedContributionAndProof, SignedExecutionPayloadBidRef,
-    SignedInclusionList, SignedProposerPreferences, SignedRoot, SignedVoluntaryExit, SigningData,
-    Slot, SyncAggregate, SyncAggregatorSelectionData, consts::gloas::BUILDER_INDEX_SELF_BUILD,
+    SignedInclusionList, SignedProposerPreferences, SignedRandaoCommitmentRegistration, SignedRoot,
+    SignedVoluntaryExit, SigningData, Slot, SyncAggregate, SyncAggregatorSelectionData,
+    consts::gloas::BUILDER_INDEX_SELF_BUILD,
 };
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -203,6 +204,34 @@ pub fn bls_execution_change_signature_set<'a, E: EthSpec>(
         &signed_address_change.signature,
         signing_key,
         message,
+    ))
+}
+
+/// A signature set for a fork-agnostic EIP-8321 commitment registration.
+pub fn randao_commitment_registration_signature_set<'a, E, F>(
+    state: &'a BeaconState<E>,
+    get_pubkey: F,
+    registration: &'a SignedRandaoCommitmentRegistration,
+    spec: &'a ChainSpec,
+) -> Result<SignatureSet<'a>>
+where
+    E: EthSpec,
+    F: Fn(usize) -> Option<Cow<'a, PublicKey>>,
+{
+    let validator_index = registration.message.validator_index;
+    let domain = spec.compute_domain(
+        Domain::RandaoCommitmentRegistration,
+        spec.genesis_fork_version,
+        state.genesis_validators_root(),
+    );
+    Ok(SignatureSet::single_pubkey(
+        &registration.signature,
+        get_pubkey(validator_index as usize).ok_or(Error::ValidatorUnknown(validator_index))?,
+        SigningData {
+            object_root: registration.message.tree_hash_root(),
+            domain,
+        }
+        .tree_hash_root(),
     ))
 }
 

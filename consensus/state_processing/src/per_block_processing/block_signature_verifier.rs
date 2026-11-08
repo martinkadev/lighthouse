@@ -9,7 +9,7 @@ use bls::{PublicKey, PublicKeyBytes, SignatureSet, verify_signature_sets};
 use std::borrow::Cow;
 use types::{
     AbstractExecPayload, BeaconState, BeaconStateError, ChainSpec, EthSpec, Hash256,
-    SignedBeaconBlock,
+    SignedBeaconBlock, consts::heze::UNSET_RANDAO_COMMITMENT,
 };
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -173,6 +173,7 @@ where
         let verified_proposer_index =
             Some(ctxt.get_proposer_index_from_epoch_state(self.state, self.spec)?);
         self.include_randao_reveal(block, verified_proposer_index)?;
+        self.include_randao_commitment_registrations(block)?;
         self.include_proposer_slashings(block)?;
         self.include_attester_slashings(block)?;
         self.include_attestations(block, ctxt)?;
@@ -211,14 +212,48 @@ where
         block: &'a SignedBeaconBlock<E, Payload>,
         verified_proposer_index: Option<u64>,
     ) -> Result<()> {
+        let proposer_index = match verified_proposer_index {
+            Some(index) => index,
+            None => self
+                .state
+                .get_beacon_proposer_index(block.slot(), self.spec)? as u64,
+        };
+        // Active hash-chain proposers are checked by process_hash_chain_randao, not BLS.
+        if self.state.fork_name_unchecked().eip8321_enabled()
+            && self
+                .state
+                .randao_commitments()?
+                .get(proposer_index as usize)
+                .is_some_and(|commitment| *commitment != UNSET_RANDAO_COMMITMENT)
+        {
+            return Ok(());
+        }
         let set = randao_signature_set(
             self.state,
             self.get_pubkey.clone(),
             block.message(),
-            verified_proposer_index,
+            Some(proposer_index),
             self.spec,
         )?;
         self.sets.push(set);
+        Ok(())
+    }
+
+    /// Include the signatures of EIP-8321 commitment registrations.
+    pub fn include_randao_commitment_registrations<Payload: AbstractExecPayload<E>>(
+        &mut self,
+        block: &'a SignedBeaconBlock<E, Payload>,
+    ) -> Result<()> {
+        if let Ok(registrations) = block.message().body().randao_commitment_registrations() {
+            for registration in registrations {
+                self.sets.push(randao_commitment_registration_signature_set(
+                    self.state,
+                    self.get_pubkey.clone(),
+                    registration,
+                    self.spec,
+                )?);
+            }
+        }
         Ok(())
     }
 

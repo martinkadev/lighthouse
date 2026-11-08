@@ -26,6 +26,8 @@ pub use gossip_verified_payload_attestation::{
 ///   (the `BeaconChainError` variant)
 #[derive(Debug, AsRefStr)]
 pub enum Error {
+    /// The payload attestation references a beacon block known to be invalid.
+    KnownInvalidBlock { beacon_block_root: Hash256 },
     /// Payload attestations are invalid before the Gloas fork.
     PreGloasSlot { slot: Slot },
     /// The payload attestation message is from a slot that is later than the current slot

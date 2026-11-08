@@ -279,11 +279,13 @@ test-network-%:
 		-p network crypto_on
 
 # Run the tests in the `slasher` crate for all supported database backends.
+# libmdbx uses attribute placement that GCC 15 rejects in its default C23 mode.
+# Compile its C sources as C11 for the configurations that enable MDBX.
 test-slasher:
 	cargo nextest run --release -p slasher --features "lmdb,$(TEST_FEATURES)"
 	cargo nextest run --release -p slasher --no-default-features --features "redb,$(TEST_FEATURES)"
-	cargo nextest run --release -p slasher --no-default-features --features "mdbx,$(TEST_FEATURES)"
-	cargo nextest run --release -p slasher --features "lmdb,mdbx,redb,$(TEST_FEATURES)" # all backends enabled
+	CFLAGS="$(CFLAGS) -std=c11" cargo nextest run --release -p slasher --no-default-features --features "mdbx,$(TEST_FEATURES)"
+	CFLAGS="$(CFLAGS) -std=c11" cargo nextest run --release -p slasher --features "lmdb,mdbx,redb,$(TEST_FEATURES)" # all backends enabled
 
 # Runs only the tests/state_transition_vectors tests.
 run-state-transition-tests:

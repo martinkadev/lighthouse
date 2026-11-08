@@ -1,17 +1,14 @@
 #!/bin/bash
+set -euo pipefail
 
-# Run lockbud to check for deadlocks and capture the output
-output=$(cargo lockbud -k deadlock -b -l tokio_util 2>&1)
+toolchain=${LOCKBUD_TOOLCHAIN:-nightly-2026-02-07}
+sysroot=$(rustc +"$toolchain" --print sysroot)
+export LD_LIBRARY_PATH="$sysroot/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-# Check if lockbud returned any issues
-if echo "$output" | grep -q '"bug_kind"'; then
-  # Print the JSON payload
-  echo "Lockbud detected issues:"
-  echo "$output"
+# Analyze Lighthouse libraries, where the application's synchronization lives.
+# Keep registry dependencies out of the detector while still compiling them.
+libraries=$(cargo +"$toolchain" metadata --locked --no-deps --format-version 1 |
+    jq -er '[.packages[].targets[] | select(.kind | index("lib")) | .name] | unique | join(",")')
+test -n "$libraries"
 
-  # Exit with a non-zero status to indicate an error
-  exit 1
-else
-  echo "No issues detected by Lockbud."
-  exit 0
-fi
+exec cargo +"$toolchain" lockbud -k deadlock -l "$libraries" --exit-code-on-bug -- --locked --workspace --lib

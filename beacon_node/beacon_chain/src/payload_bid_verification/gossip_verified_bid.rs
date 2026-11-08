@@ -321,7 +321,7 @@ impl<E: EthSpec> GossipVerifiedPayloadBid<E> {
         T: BeaconChainTypes<EthSpec = E>,
     {
         // Ensure the bid is the correct structure for the fork at `bid.slot()`.
-        signed_bid
+        let fork = signed_bid
             .fork_name(ctx.spec)
             .map_err(PayloadBidError::InconsistentFork)?;
 
@@ -333,7 +333,26 @@ impl<E: EthSpec> GossipVerifiedPayloadBid<E> {
             .slot_clock
             .now()
             .ok_or(PayloadBidError::UnableToReadSlot)?;
-        verify_bid_slot(bid_slot, current_slot)?;
+        if fork.eip8321_enabled() {
+            // Keep the lower bound at genesis when subtracting the tolerance crosses it.
+            let disparity = ctx.spec.maximum_gossip_clock_disparity();
+            let earliest = ctx
+                .slot_clock
+                .now_with_past_tolerance(
+                    disparity.saturating_add(std::time::Duration::from_nanos(1)),
+                )
+                .unwrap_or(current_slot);
+            let latest = ctx
+                .slot_clock
+                .now_with_future_tolerance(disparity)
+                .ok_or(PayloadBidError::UnableToReadSlot)?
+                .saturating_add(1_u64);
+            if bid_slot < earliest || bid_slot > latest {
+                return Err(PayloadBidError::InvalidBidSlot { bid_slot });
+            }
+        } else {
+            verify_bid_slot(bid_slot, current_slot)?;
+        }
 
         if ctx
             .gossip_verified_payload_bid_cache
@@ -480,6 +499,27 @@ impl<E: EthSpec> GossipVerifiedPayloadBid<E> {
             return Err(PayloadBidError::InvalidPrevRandao { slot: bid_slot });
         }
 
+        // Builder balances and pending payments change at epoch boundaries. The
+        // gossip specification checks them in the state advanced to the bid slot,
+        // after checking RANDAO against the unadvanced parent state.
+        let bid_state;
+        let head_state = if fork.eip8321_enabled() && bid_slot > head_state.slot() {
+            bid_state = {
+                let mut state = head_state.clone();
+                state_processing::state_advance::complete_state_advance(
+                    &mut state, None, bid_slot, None, ctx.spec,
+                )
+                .map_err(|error| {
+                    PayloadBidError::InternalError(format!(
+                        "failed to advance bid state: {error:?}"
+                    ))
+                })?;
+                state
+            };
+            &bid_state
+        } else {
+            head_state
+        };
         verify_bid_state_conditions(signed_bid.message(), head_state, ctx.spec)?;
 
         if parent_payload_exits_builder::<T>(

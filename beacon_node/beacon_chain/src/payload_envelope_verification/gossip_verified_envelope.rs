@@ -188,7 +188,7 @@ impl<T: BeaconChainTypes> GossipVerifiedEnvelope<T> {
 
         let latest_finalized_slot = ctx
             .canonical_head
-            .cached_head()
+            .fork_choice_read_lock()
             .finalized_checkpoint()
             .epoch
             .start_slot(T::EthSpec::slots_per_epoch());
@@ -374,6 +374,15 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         envelope: Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>,
         source: EnvelopeSource,
     ) -> Result<GossipVerifiedEnvelope<T>, EnvelopeError> {
+        if self
+            .config
+            .invalid_block_roots
+            .contains(&envelope.message.beacon_block_root)
+        {
+            return Err(EnvelopeError::KnownInvalidBlock {
+                block_root: envelope.message.beacon_block_root,
+            });
+        }
         let chain = self.clone();
         self.task_executor
             .clone()

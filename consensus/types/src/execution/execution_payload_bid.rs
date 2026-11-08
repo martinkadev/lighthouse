@@ -185,8 +185,11 @@ impl<'a, E: EthSpec> ExecutionPayloadBidRef<'a, E> {
         let fork_at_slot = spec.fork_name_at_slot::<E>(self.slot());
         let object_fork = self.fork_name_unchecked();
 
-        if fork_at_slot == object_fork {
-            Ok(object_fork)
+        // EIP-8321 retains the Heze bid wire schema, as selected by its SSZ decoder.
+        if fork_at_slot == object_fork
+            || (fork_at_slot.eip8321_enabled() && object_fork == ForkName::Heze)
+        {
+            Ok(fork_at_slot)
         } else {
             Err(InconsistentFork {
                 fork_at_slot,
@@ -292,5 +295,25 @@ mod heze_tests {
             ExecutionPayloadBidRef::Heze(&bid_with_bits).signing_root(domain),
             "inclusion_list_bits must be covered by the Heze bid signing root",
         );
+    }
+}
+
+#[cfg(test)]
+mod bid_fork_compatibility {
+    use super::*;
+    use crate::MinimalEthSpec;
+
+    #[test]
+    fn eip8321_accepts_the_heze_schema_selected_by_the_decoder() {
+        let spec = ForkName::Eip8321.make_genesis_spec(MinimalEthSpec::default_spec());
+        let bid = ExecutionPayloadBid::<MinimalEthSpec>::Heze(ExecutionPayloadBidHeze::default());
+        assert_eq!(bid.to_ref().fork_name(&spec), Ok(ForkName::Eip8321));
+    }
+
+    #[test]
+    fn eip8321_rejects_the_pre_heze_gloas_schema() {
+        let spec = ForkName::Eip8321.make_genesis_spec(MinimalEthSpec::default_spec());
+        let bid = ExecutionPayloadBid::<MinimalEthSpec>::Gloas(ExecutionPayloadBidGloas::default());
+        assert!(bid.to_ref().fork_name(&spec).is_err());
     }
 }
