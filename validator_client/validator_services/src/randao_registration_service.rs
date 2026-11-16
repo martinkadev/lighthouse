@@ -3,9 +3,10 @@
 //! [New in Eip8321: EIP-8321]
 //!
 //! A validator with an EIP-8321 hash chain registers the tip of the chain once, then reveals
-//! preimages when it proposes. This service submits the registration when no registration is known
-//! locally, retrying on each epoch transition until a beacon node accepts it, and persists the
-//! submission and activation epochs so a restart does not re-register.
+//! preimages when it proposes. Once the EIP-8321 fork is active, this service submits the
+//! registration when no registration is known locally, retrying every slot until a beacon node
+//! accepts it, and persists the submission and activation epochs so a restart does not
+//! re-register.
 //!
 //! Remote signers are gated: `web3signer` has no message type for a hash-chain RANDAO
 //! registration, so [`ValidatorStore::sign_randao_commitment_registration`] fails for those keys
@@ -119,7 +120,7 @@ pub struct Inner<S, T> {
     randao_chain: Arc<RandaoChainStore>,
 }
 
-/// Submits hash-chain RANDAO commitment registrations at start-up and on epoch transitions.
+/// Submits hash-chain RANDAO commitment registrations once the EIP-8321 fork is active.
 pub struct RandaoRegistrationService<S, T> {
     inner: Arc<Inner<S, T>>,
 }
@@ -141,7 +142,7 @@ impl<S, T> Deref for RandaoRegistrationService<S, T> {
 }
 
 impl<S: ValidatorStore + 'static, T: SlotClock + 'static> RandaoRegistrationService<S, T> {
-    /// Start the service, which submits registrations once per epoch.
+    /// Start the service, which checks for unregistered validators every slot.
     pub fn start_update_service(self) -> Result<(), String> {
         info!("RANDAO commitment registration service started");
 
@@ -231,7 +232,7 @@ impl<S: ValidatorStore + 'static, T: SlotClock + 'static> RandaoRegistrationServ
                     warn!(
                         ?pubkey,
                         error = ?e,
-                        "Unable to sign RANDAO commitment registration; will retry next epoch"
+                        "Unable to sign RANDAO commitment registration; will retry next slot"
                     );
                 }
             }
@@ -286,7 +287,7 @@ impl<S: ValidatorStore + 'static, T: SlotClock + 'static> RandaoRegistrationServ
                         epoch = epoch.as_u64(),
                         count,
                         error = %e,
-                        "Beacon node rejected RANDAO commitment registrations; will retry next epoch"
+                        "Beacon node rejected RANDAO commitment registrations; will retry next slot"
                     );
                 }
             }
@@ -296,18 +297,16 @@ impl<S: ValidatorStore + 'static, T: SlotClock + 'static> RandaoRegistrationServ
     }
 }
 
-/// Only register once EIP-8321 is scheduled: the beacon node rejects registrations
-/// before the fork, and the commitment must be in place when the fork activates, so start one
-/// `COMMITMENT_REGISTRATION_DELAY` before it.
+/// Only register once EIP-8321 is active.
+///
+/// Registrations are only valid in EIP-8321 blocks: beacon nodes reject them over the API while
+/// their head is pre-fork, and the `randao_commitment_registration` gossip topic only exists
+/// under EIP-8321 fork digests. Submitting earlier only produces rejected requests every slot.
+/// Validators keep proposing on the legacy BLS path until their registration activates
+/// `COMMITMENT_REGISTRATION_DELAY` epochs after inclusion, so nothing is lost by waiting.
 fn should_register<E: EthSpec>(slot: Slot, spec: &ChainSpec) -> bool {
     let epoch = slot.epoch(E::slots_per_epoch());
-    if spec.fork_name_at_epoch(epoch).eip8321_enabled() {
-        return true;
-    }
-
-    spec.eip8321_fork_epoch.is_some_and(|fork_epoch| {
-        epoch.saturating_add(Epoch::new(E::commitment_registration_delay())) >= fork_epoch
-    })
+    spec.fork_name_at_epoch(epoch).eip8321_enabled()
 }
 
 #[cfg(test)]
@@ -315,7 +314,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_register_starts_one_delay_before_the_fork() {
+    fn should_register_only_from_the_fork() {
         let mut spec = ChainSpec::default();
         let fork_epoch = Epoch::new(10);
         spec.eip8321_fork_epoch = Some(fork_epoch);
@@ -323,18 +322,22 @@ mod tests {
         let epoch_to_slot =
             |epoch: u64| Slot::new(epoch * <types::MainnetEthSpec as EthSpec>::slots_per_epoch());
 
+        for epoch in [0, 7, 9] {
+            assert!(!should_register::<types::MainnetEthSpec>(
+                epoch_to_slot(epoch),
+                &spec
+            ));
+        }
         assert!(!should_register::<types::MainnetEthSpec>(
-            epoch_to_slot(6),
+            epoch_to_slot(10) - 1,
             &spec
         ));
-        assert!(should_register::<types::MainnetEthSpec>(
-            epoch_to_slot(7),
-            &spec
-        ));
-        assert!(should_register::<types::MainnetEthSpec>(
-            epoch_to_slot(10),
-            &spec
-        ));
+        for epoch in [10, 11, 1_000] {
+            assert!(should_register::<types::MainnetEthSpec>(
+                epoch_to_slot(epoch),
+                &spec
+            ));
+        }
     }
 
     #[test]

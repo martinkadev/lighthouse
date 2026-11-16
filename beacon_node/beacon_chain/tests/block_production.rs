@@ -513,3 +513,65 @@ async fn heze_self_build_bid_claims_held_inclusion_lists() {
         );
     }
 }
+
+/// [New in Eip8321: EIP-8321] A validator client only estimates when its commitment registration
+/// activates, so it may offer a hash-chain preimage before the commitment is active on-chain. With
+/// a real BLS reveal alongside, the block must use the legacy path and ignore the preimage; with
+/// only the point at infinity there is no valid reveal and production must fail.
+#[tokio::test]
+async fn eip8321_unregistered_proposer_falls_back_to_the_bls_reveal() {
+    let spec = test_spec::<E>();
+    if !spec.fork_name_at_slot::<E>(Slot::new(0)).eip8321_enabled() {
+        return;
+    }
+    let spec = Arc::new(spec);
+    let harness = BeaconChainHarness::builder(E::default())
+        .spec(spec.clone())
+        .deterministic_keypairs(64)
+        .fresh_ephemeral_store()
+        .mock_execution_layer()
+        .build();
+    harness.extend_to_slot(Slot::new(1)).await;
+
+    let slot = Slot::new(2);
+    harness.advance_slot();
+    let mut state = harness.get_current_state();
+    state_processing::state_advance::complete_state_advance(&mut state, None, slot, None, &spec)
+        .unwrap();
+    state.build_caches(&spec).unwrap();
+    let proposer_index = state.get_beacon_proposer_index(slot, &spec).unwrap();
+    assert_eq!(
+        state.randao_commitments().unwrap()[proposer_index],
+        Hash256::ZERO,
+        "no validator is registered at genesis"
+    );
+    let bls_reveal = harness.sign_randao_reveal(&state, proposer_index, slot);
+    let early_preimage = Hash256::repeat_byte(0x42);
+
+    let produce = |randao_reveal: Signature| {
+        harness.chain.produce_block_with_verification_gloas(
+            randao_reveal,
+            slot,
+            GraffitiSettings::new(None, Some(GraffitiPolicy::PreserveUserGraffiti)),
+            ProduceBlockVerification::VerifyRandao,
+            BuilderConfig::empty(),
+            Some(early_preimage),
+        )
+    };
+
+    let (block, ..) = produce(bls_reveal.clone())
+        .await
+        .expect("the BLS reveal is valid for a proposer without an active commitment");
+    assert_eq!(
+        *block.body().hash_chain_reveal().unwrap(),
+        Hash256::ZERO,
+        "an unregistered proposer must not reveal a preimage"
+    );
+    assert_eq!(*block.body().randao_reveal(), bls_reveal);
+
+    match produce(Signature::infinity().unwrap()).await {
+        Err(BlockProductionError::HashChainRandaoUnexpected) => {}
+        Err(other) => panic!("expected HashChainRandaoUnexpected, got {other:?}"),
+        Ok(_) => panic!("a preimage without a usable BLS reveal cannot produce a valid block"),
+    }
+}
