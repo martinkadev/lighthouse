@@ -1,0 +1,4 @@
+.ethereum-package/
+eip8321-evidence-*/
+.kurtosis-deps/
+__pycache__/

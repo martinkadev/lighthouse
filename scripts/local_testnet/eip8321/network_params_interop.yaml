@@ -1,0 +1,50 @@
+# EIP-8321 (hash-chain RANDAO) Lighthouse <-> Prysm interop devnet.
+#
+# Two Lighthouse and two Prysm beacon nodes, each with its own validator client and Geth.
+# The chain starts at Heze and upgrades to the EIP-8321 feature fork at epoch 4
+# (slot 32 with the minimal preset). Every client proposes, so blocks produced by
+# Lighthouse must be imported by Prysm and vice versa, on both the legacy BLS path and
+# the hash-chain path.
+#
+# Requires the patched ethereum-package (see ./start_interop.sh and README.md).
+participants:
+  - el_type: geth
+    el_image: ethpandaops/geth:heze-devnet-2-66af2fe
+    cl_type: lighthouse
+    cl_image: lighthouse:eip8321-minimal
+    vc_image: lighthouse:eip8321-minimal
+    supernode: true
+    cl_extra_params:
+      - --target-peers=3
+    count: 2
+    validator_count: 64
+
+  - el_type: geth
+    el_image: ethpandaops/geth:heze-devnet-2-66af2fe
+    cl_type: prysm
+    cl_image: bct/prysm-beacon:eip8321-minimal
+    vc_image: bct/prysm-validator:eip8321-minimal
+    vc_extra_params:
+      - --enable-beacon-rest-api
+    supernode: true
+    count: 2
+    validator_count: 64
+
+network_params:
+  preset: minimal
+  genesis_delay: 120
+  electra_fork_epoch: 0
+  fulu_fork_epoch: 0
+  gloas_fork_epoch: 0
+  heze_fork_epoch: 0
+  eip8321_fork_epoch: 4
+  # Must be identical for every client: it feeds the fork digest and the signing domains.
+  eip8321_fork_version: '0xe8321101'
+
+global_log_level: debug
+
+# Upstream Dora cannot decode the EIP-8321 `BeaconBlockBody`, so it is optional and not
+# used for any check. `check_interop.py` reads every beacon node directly instead.
+additional_services: []
+
+wait_for_finalization: false
