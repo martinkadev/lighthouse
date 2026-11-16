@@ -131,3 +131,7 @@ It runs Gloas → Heze → EIP-8321 and checks the following:
 - all nodes, including one that joins late and syncs the EIP-8321 blocks over req/resp,
   agree on the canonical chain;
 - finality advances past the fork.
+
+## Results
+
+See [VALIDATION.md](VALIDATION.md) for the recorded interop runs and the bugs they found.
