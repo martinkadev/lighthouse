@@ -103,6 +103,10 @@ pub fn core_topics_to_subscribe<E: EthSpec>(
 
     if fork_name.heze_enabled() {
         topics.push(GossipKind::InclusionList);
+    }
+
+    // [New in Eip8321: EIP-8321]
+    if fork_name.eip8321_enabled() {
         topics.push(GossipKind::RandaoCommitmentRegistration);
     }
 
@@ -301,6 +305,7 @@ impl GossipTopic {
                 PROPOSER_PREFERENCES => GossipKind::ProposerPreferences,
                 EXECUTION_PROOF => GossipKind::ExecutionProof,
                 INCLUSION_LIST => GossipKind::InclusionList,
+                RANDAO_COMMITMENT_REGISTRATION => GossipKind::RandaoCommitmentRegistration,
                 LIGHT_CLIENT_FINALITY_UPDATE => GossipKind::LightClientFinalityUpdate,
                 LIGHT_CLIENT_OPTIMISTIC_UPDATE => GossipKind::LightClientOptimisticUpdate,
                 topic => match subnet_topic_index(topic) {
@@ -445,6 +450,7 @@ mod tests {
                 ProposerSlashing,
                 AttesterSlashing,
                 InclusionList,
+                RandaoCommitmentRegistration,
             ]
             .iter()
             {
@@ -626,6 +632,49 @@ mod tests {
                 topics.contains(&expected_topic),
                 "Should contain {:?}",
                 expected_topic
+            );
+        }
+    }
+
+    /// Every topic a node subscribes to must also parse back from its string form, otherwise
+    /// every message received on it is dropped as "Unknown gossipsub topic". This happened to
+    /// the EIP-8321 `randao_commitment_registration` topic.
+    #[test]
+    fn every_core_topic_round_trips() {
+        let spec = get_spec();
+        let s = HashSet::from_iter([0, 1].map(DataColumnSubnetId::new));
+        let topic_config = TopicConfig {
+            enable_light_client_server: true,
+            enable_execution_proof: true,
+            subscribe_all_subnets: true,
+            sampling_subnets: s,
+        };
+        for fork in ForkName::list_all() {
+            for kind in core_topics_to_subscribe::<E>(fork, &topic_config, &spec) {
+                let topic = GossipTopic::new(kind.clone(), GossipEncoding::SSZSnappy, [1, 2, 3, 4]);
+                let topic_string: String = topic.clone().into();
+                assert_eq!(
+                    GossipTopic::decode(&topic_string).map(|decoded| decoded.kind().clone()),
+                    Ok(kind),
+                    "{topic_string} at {fork}"
+                );
+            }
+        }
+    }
+
+    /// [New in Eip8321: EIP-8321] The registration topic is introduced by the EIP-8321 fork,
+    /// not by Heze, so it must only be subscribed under EIP-8321 fork digests.
+    #[test]
+    fn randao_commitment_registration_is_subscribed_from_eip8321() {
+        let spec = get_spec();
+        let s = get_sampling_subnets();
+        let topic_config = get_topic_config(&s);
+        for fork in ForkName::list_all() {
+            let topics = core_topics_to_subscribe::<E>(fork, &topic_config, &spec);
+            assert_eq!(
+                topics.contains(&GossipKind::RandaoCommitmentRegistration),
+                fork.eip8321_enabled(),
+                "{fork}"
             );
         }
     }

@@ -290,6 +290,7 @@ pub(crate) fn create_whitelist_filter(
         add(ProposerPreferences);
         add(ExecutionProof);
         add(InclusionList);
+        add(RandaoCommitmentRegistration);
         add(LightClientFinalityUpdate);
         add(LightClientOptimisticUpdate);
         for id in 0..spec.attestation_subnet_count {
@@ -323,6 +324,45 @@ pub(crate) fn save_metadata_to_disk<E: EthSpec>(dir: &Path, metadata: MetaData<E
                 error = %e,
                 "Could not write metadata to disk"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{TopicConfig, core_topics_to_subscribe};
+    use gossipsub::TopicSubscriptionFilter;
+    use std::collections::HashSet;
+    use types::{ForkName, MinimalEthSpec};
+
+    /// Every core topic of every fork must pass the subscription whitelist, otherwise the
+    /// node silently fails to subscribe (`NotAllowed`) and also ignores peers' subscriptions to
+    /// it. This happened to the EIP-8321 `randao_commitment_registration` topic.
+    #[test]
+    fn whitelist_allows_every_core_topic() {
+        let spec = ForkName::latest().make_genesis_spec(MinimalEthSpec::default_spec());
+        let digests = vec![[1, 2, 3, 4], [5, 6, 7, 8]];
+        let sync_committee_subnet_count = 4;
+        let mut filter =
+            create_whitelist_filter(digests.clone(), &spec, sync_committee_subnet_count);
+        let topic_config = TopicConfig {
+            enable_light_client_server: true,
+            enable_execution_proof: true,
+            subscribe_all_subnets: true,
+            sampling_subnets: HashSet::new(),
+        };
+        for fork in ForkName::list_all() {
+            for kind in core_topics_to_subscribe::<MinimalEthSpec>(fork, &topic_config, &spec) {
+                for digest in &digests {
+                    let topic: gossipsub::IdentTopic =
+                        GossipTopic::new(kind.clone(), GossipEncoding::SSZSnappy, *digest).into();
+                    assert!(
+                        filter.can_subscribe(&topic.hash()),
+                        "{kind:?} at {fork} is not whitelisted"
+                    );
+                }
+            }
         }
     }
 }
