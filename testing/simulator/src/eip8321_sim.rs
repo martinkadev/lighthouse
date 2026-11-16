@@ -181,6 +181,9 @@ pub fn run_eip8321_sim(matches: &ArgMatches) -> Result<(), String> {
     let mut slot_duration_ms = spec.genesis_slot_duration().as_millis() as u64;
     slot_duration_ms /= speed_up_factor;
     slot_duration_ms = max(1_000, slot_duration_ms);
+    // Keep the slot duration constant across Heze (EIP-8198 can change it there): the checks
+    // convert epochs to wall-clock delays with a single slot duration.
+    spec.slot_duration_ms_heze = slot_duration_ms;
     spec = spec.set_slot_duration_ms::<MinimalEthSpec>(slot_duration_ms);
 
     spec.genesis_delay = genesis_delay;
@@ -317,10 +320,11 @@ pub fn run_eip8321_sim(matches: &ArgMatches) -> Result<(), String> {
                 slot_duration,
                 initial_validator_count,
             ),
-            // Check that all nodes have transitioned to the EIP-8321 fork.
+            // Check that all nodes have transitioned to the EIP-8321 fork. Check one epoch after
+            // the fork so a late or missed fork-slot block does not leave a Heze head state.
             checks::verify_fork_version(
                 network.clone(),
-                Epoch::new(latest_fork_start_epoch),
+                Epoch::new(latest_fork_start_epoch + 1),
                 slot_duration,
                 latest_fork_version,
             ),
