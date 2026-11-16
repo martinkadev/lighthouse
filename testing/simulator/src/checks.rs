@@ -553,3 +553,182 @@ pub async fn check_attestation_correctness<E: EthSpec>(
 
     Ok(())
 }
+
+/// Summary of the EIP-8321 activity observed on the canonical chain.
+#[derive(Debug, Default)]
+pub struct HashChainRandaoSummary {
+    pub registrations: usize,
+    pub hash_chain_reveals: usize,
+    pub legacy_reveals: usize,
+}
+
+/// [New in Eip8321: EIP-8321] Walks the canonical chain of every node from `fork_slot` to
+/// `upto_slot` and verifies the hash-chain RANDAO lifecycle end to end:
+///
+/// - every node has the same canonical block at every slot (including blocks synced over RPC);
+/// - registrations are included, each validator at most once and with a non-zero commitment;
+/// - once a registration activates, the proposer reveals the next preimage of its chain:
+///   `blake3(DST || reveal) == previous commitment`, with `randao_reveal` the point at infinity;
+/// - proposers without an active commitment keep the zero reveal and a real BLS reveal;
+/// - at least `min_registrations` registrations and `min_reveals` reveals occurred.
+pub async fn verify_hash_chain_randao<E: EthSpec>(
+    network: LocalNetwork<E>,
+    fork_slot: Slot,
+    upto_slot: Slot,
+    slot_duration: Duration,
+    check_at: Slot,
+    min_registrations: usize,
+    min_reveals: usize,
+) -> Result<HashChainRandaoSummary, String> {
+    use state_processing::per_block_processing::hash_chain_commitment;
+    use std::collections::HashMap;
+    use types::Hash256;
+
+    slot_delay(check_at, slot_duration).await;
+
+    let beacon_nodes = network.beacon_nodes.read();
+    let dumps = beacon_nodes
+        .iter()
+        .map(|node| {
+            let chain = node
+                .client
+                .beacon_chain()
+                .ok_or("beacon node has no beacon chain")?;
+            let blocks = chain
+                .chain_dump()
+                .map_err(|e| format!("chain_dump failed: {e:?}"))?
+                .into_iter()
+                .filter(|s| {
+                    s.beacon_block.slot() >= fork_slot && s.beacon_block.slot() <= upto_slot
+                })
+                .map(|s| (s.beacon_block.slot(), (s.beacon_block_root, s.beacon_block)))
+                .collect::<Vec<_>>();
+            Ok::<_, String>(blocks)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(beacon_nodes);
+
+    let reference = dumps.first().ok_or("no beacon nodes")?;
+    for (index, dump) in dumps.iter().enumerate().skip(1) {
+        let a = reference.iter().map(|(slot, (root, _))| (*slot, *root));
+        let b = dump.iter().map(|(slot, (root, _))| (*slot, *root));
+        if !a.eq(b) {
+            return Err(format!(
+                "node {index} disagrees with node 0 on the canonical chain between slots \
+                 {fork_slot} and {upto_slot}"
+            ));
+        }
+    }
+
+    let delay = E::commitment_registration_delay();
+    let mut commitments: HashMap<u64, (Hash256, Epoch)> = HashMap::new();
+    let mut summary = HashChainRandaoSummary::default();
+    for (slot, (_, block)) in reference {
+        let message = block.message();
+        let body = message.body();
+        let epoch = slot.epoch(E::slots_per_epoch());
+        let proposer = message.proposer_index();
+        let reveal = *body
+            .hash_chain_reveal()
+            .map_err(|_| format!("block at slot {slot} is not an EIP-8321 block"))?;
+        let registrations = body
+            .randao_commitment_registrations()
+            .map_err(|_| format!("block at slot {slot} is not an EIP-8321 block"))?;
+
+        match commitments.get(&proposer).copied() {
+            Some((commitment, activation_epoch)) if epoch >= activation_epoch => {
+                if reveal.is_zero() {
+                    return Err(format!(
+                        "slot {slot}: proposer {proposer} has an active commitment but revealed zero"
+                    ));
+                }
+                if hash_chain_commitment(reveal) != commitment {
+                    return Err(format!(
+                        "slot {slot}: reveal of proposer {proposer} does not hash to its commitment"
+                    ));
+                }
+                if !body.randao_reveal().is_infinity() {
+                    return Err(format!(
+                        "slot {slot}: hash-chain proposer {proposer} must use the point at infinity"
+                    ));
+                }
+                commitments.insert(proposer, (reveal, activation_epoch));
+                summary.hash_chain_reveals += 1;
+            }
+            _ => {
+                if !reveal.is_zero() {
+                    return Err(format!(
+                        "slot {slot}: proposer {proposer} revealed without an active commitment"
+                    ));
+                }
+                if body.randao_reveal().is_infinity() {
+                    return Err(format!(
+                        "slot {slot}: legacy proposer {proposer} used the point at infinity"
+                    ));
+                }
+                summary.legacy_reveals += 1;
+            }
+        }
+
+        // RANDAO is processed before the operations of the same block.
+        for signed in registrations.iter() {
+            let index = signed.message.validator_index;
+            if signed.message.commitment.is_zero() {
+                return Err(format!(
+                    "slot {slot}: zero commitment registered for {index}"
+                ));
+            }
+            if commitments
+                .insert(index, (signed.message.commitment, epoch + delay))
+                .is_some()
+            {
+                return Err(format!("slot {slot}: validator {index} registered twice"));
+            }
+            summary.registrations += 1;
+        }
+    }
+
+    println!("EIP-8321 summary: {summary:?}");
+    if summary.registrations < min_registrations {
+        return Err(format!(
+            "only {} registrations included, expected at least {min_registrations}",
+            summary.registrations
+        ));
+    }
+    if summary.hash_chain_reveals < min_reveals {
+        return Err(format!(
+            "only {} hash-chain reveals included, expected at least {min_reveals}",
+            summary.hash_chain_reveals
+        ));
+    }
+    Ok(summary)
+}
+
+/// Waits until `at_epoch`, then verifies that every node has finalized at least `min_epoch`.
+pub async fn verify_finalized_at_least<E: EthSpec>(
+    network: LocalNetwork<E>,
+    at_epoch: Epoch,
+    min_epoch: Epoch,
+    slot_duration: Duration,
+) -> Result<(), String> {
+    epoch_delay(at_epoch, slot_duration, E::slots_per_epoch()).await;
+    let mut epochs = Vec::new();
+    for remote_node in network.remote_nodes()? {
+        epochs.push(
+            remote_node
+                .get_beacon_states_finality_checkpoints(StateId::Head)
+                .await
+                .map_err(|e| format!("Get finality via http failed: {e:?}"))?
+                .ok_or("no finality checkpoints")?
+                .data
+                .finalized
+                .epoch,
+        );
+    }
+    if epochs.iter().any(|epoch| *epoch < min_epoch) {
+        return Err(format!(
+            "Nodes have not finalized epoch {min_epoch} by epoch {at_epoch}: {epochs:?}"
+        ));
+    }
+    Ok(())
+}

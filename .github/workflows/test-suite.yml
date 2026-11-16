@@ -381,6 +381,28 @@ jobs:
       with:
         name: basic_simulator_logs
         path: ${{ runner.temp }}/basic_simulator_logs
+  eip8321-simulator-ubuntu:
+    name: eip8321-simulator-ubuntu
+    needs: [check-labels]
+    if: needs.check-labels.outputs.skip_ci != 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Get latest version of stable Rust
+      uses: moonrepo/setup-rust@v1
+      with:
+          channel: stable
+          cache-target: release
+    - name: Create log dir
+      run: mkdir ${{ runner.temp }}/eip8321_simulator_logs
+    - name: Run a beacon chain sim through the EIP-8321 fork
+      run: cargo run --release --bin simulator eip8321-sim --disable-stdout-logging --log-dir ${{ runner.temp }}/eip8321_simulator_logs
+    - name: Upload logs
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: eip8321_simulator_logs
+        path: ${{ runner.temp }}/eip8321_simulator_logs
   fallback-simulator-ubuntu:
     name: fallback-simulator-ubuntu
     needs: [check-labels]
@@ -579,6 +601,7 @@ jobs:
       'ef-tests-mainnet-ubuntu',
       'ef-tests-minimal-ubuntu',
       'basic-simulator-ubuntu',
+      'eip8321-simulator-ubuntu',
       'fallback-simulator-ubuntu',
       'execution-engine-integration-ubuntu',
       'check-code',

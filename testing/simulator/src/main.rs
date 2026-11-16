@@ -13,6 +13,7 @@
 mod basic_sim;
 mod checks;
 mod cli;
+mod eip8321_sim;
 mod fallback_sim;
 mod local_network;
 mod retry;
@@ -27,6 +28,13 @@ fn main() {
     let matches = cli_app().get_matches();
     match matches.subcommand_name() {
         Some("basic-sim") => match basic_sim::run_basic_sim(&matches) {
+            Ok(()) => println!("Simulation exited successfully"),
+            Err(e) => {
+                eprintln!("Simulation exited with error: {}", e);
+                std::process::exit(1)
+            }
+        },
+        Some("eip8321-sim") => match eip8321_sim::run_eip8321_sim(&matches) {
             Ok(()) => println!("Simulation exited successfully"),
             Err(e) => {
                 eprintln!("Simulation exited with error: {}", e);
