@@ -262,21 +262,24 @@ impl BuilderOnlyProposer {
 
         let bid = match &self.state {
             BeaconState::Gloas(_) => ExecutionPayloadBid::Gloas(bid),
-            BeaconState::Heze(_) => ExecutionPayloadBid::Heze(ExecutionPayloadBidHeze {
-                parent_block_hash: bid.parent_block_hash,
-                parent_block_root: bid.parent_block_root,
-                block_hash: bid.block_hash,
-                prev_randao: bid.prev_randao,
-                fee_recipient: bid.fee_recipient,
-                gas_limit: bid.gas_limit,
-                builder_index: bid.builder_index,
-                slot: bid.slot,
-                value: bid.value,
-                execution_payment: bid.execution_payment,
-                blob_kzg_commitments: bid.blob_kzg_commitments,
-                execution_requests_root: bid.execution_requests_root,
-                inclusion_list_bits: inclusion_list_bits.unwrap_or_default(),
-            }),
+            // EIP-8321 keeps the Heze bid.
+            BeaconState::Heze(_) | BeaconState::Eip8321(_) => {
+                ExecutionPayloadBid::Heze(ExecutionPayloadBidHeze {
+                    parent_block_hash: bid.parent_block_hash,
+                    parent_block_root: bid.parent_block_root,
+                    block_hash: bid.block_hash,
+                    prev_randao: bid.prev_randao,
+                    fee_recipient: bid.fee_recipient,
+                    gas_limit: bid.gas_limit,
+                    builder_index: bid.builder_index,
+                    slot: bid.slot,
+                    value: bid.value,
+                    execution_payment: bid.execution_payment,
+                    blob_kzg_commitments: bid.blob_kzg_commitments,
+                    execution_requests_root: bid.execution_requests_root,
+                    inclusion_list_bits: inclusion_list_bits.unwrap_or_default(),
+                })
+            }
             state => panic!(
                 "builder bids start at Gloas, got a {} state",
                 state.fork_name_unchecked()
@@ -541,8 +544,12 @@ async fn eip8321_unregistered_proposer_falls_back_to_the_bls_reveal() {
     state.build_caches(&spec).unwrap();
     let proposer_index = state.get_beacon_proposer_index(slot, &spec).unwrap();
     assert_eq!(
-        state.randao_commitments().unwrap()[proposer_index],
-        Hash256::ZERO,
+        state
+            .randao_commitments()
+            .unwrap()
+            .get(proposer_index)
+            .copied(),
+        Some(Hash256::ZERO),
         "no validator is registered at genesis"
     );
     let bls_reveal = harness.sign_randao_reveal(&state, proposer_index, slot);
