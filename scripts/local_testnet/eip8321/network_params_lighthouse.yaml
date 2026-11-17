@@ -1,0 +1,29 @@
+# EIP-8321 Lighthouse-only devnet: the baseline to run before the interop network.
+#
+# Same fork schedule as network_params_interop.yaml, but every node is Lighthouse. If this
+# network does not finalize past the fork, fix Lighthouse before looking at interop failures.
+participants:
+  - el_type: geth
+    el_image: ethpandaops/geth:heze-devnet-2-66af2fe
+    cl_type: lighthouse
+    cl_image: lighthouse:eip8321-minimal
+    vc_image: lighthouse:eip8321-minimal
+    supernode: true
+    cl_extra_params:
+      - --target-peers=3
+    count: 3
+    validator_count: 64
+
+network_params:
+  preset: minimal
+  genesis_delay: 120
+  electra_fork_epoch: 0
+  fulu_fork_epoch: 0
+  gloas_fork_epoch: 0
+  heze_fork_epoch: 0
+  eip8321_fork_epoch: 4
+  eip8321_fork_version: '0xe8321101'
+
+global_log_level: debug
+additional_services: []
+wait_for_finalization: false

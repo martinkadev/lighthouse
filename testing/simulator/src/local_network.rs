@@ -119,6 +119,16 @@ fn default_mock_execution_config<E: EthSpec>(
         )
     }
 
+    if let Some(heze_fork_epoch) = spec.heze_fork_epoch {
+        mock_execution_config.heze_time = Some(
+            spec.compute_time_at_slot::<E>(
+                genesis_time,
+                heze_fork_epoch.start_slot(E::slots_per_epoch()),
+            )
+            .expect("fork time fits in u64"),
+        )
+    }
+
     mock_execution_config
 }
 

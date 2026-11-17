@@ -1,0 +1,112 @@
+diff --git a/src/package_io/input_parser.star b/src/package_io/input_parser.star
+index 67607cd..e583fd1 100644
+--- a/src/package_io/input_parser.star
++++ b/src/package_io/input_parser.star
+@@ -99,6 +99,23 @@ ATTR_TO_BE_SKIPPED_AT_ROOT = (
+ )
+ 
+ 
++def validate_eip8321(network_params):
++    epoch = network_params["eip8321_fork_epoch"]
++    version = network_params["eip8321_fork_version"]
++    if type(epoch) != "int" or epoch < 0 or epoch > constants.FAR_FUTURE_EPOCH:
++        fail("eip8321_fork_epoch must be a non-negative uint64")
++    if type(version) != "string" or len(version) != 10 or not version.startswith("0x"):
++        fail("eip8321_fork_version must be a four-byte hex value")
++    for i in range(2, 10):
++        if version[i] not in "0123456789abcdefABCDEF":
++            fail("eip8321_fork_version must be a four-byte hex value")
++    if epoch != constants.FAR_FUTURE_EPOCH:
++        if epoch == 0 or network_params["heze_fork_epoch"] >= epoch:
++            fail("EIP-8321 must activate after Heze; EIP-8321-at-genesis is not supported")
++        if network_params["frames_enabled"]:
++            fail("EIP-8321 requires Heze with FOCIL, not frames_enabled")
++
++
+ def validate_slot_duration_heze(network_params):
+     slot_duration_ms_heze = network_params["slot_duration_ms_heze"]
+ 
+@@ -686,6 +703,7 @@ def input_parser(plan, input_args):
+                 )
+             )
+ 
++    validate_eip8321(result["network_params"])
+     validate_slot_duration_heze(result["network_params"])
+     schedule_heze_slot_duration_bpo(
+         plan, result["network_params"], input_args.get("network_params", {})
+@@ -979,6 +997,8 @@ def input_parser(plan, input_args):
+             fulu_fork_epoch=result["network_params"]["fulu_fork_epoch"],
+             gloas_fork_epoch=result["network_params"]["gloas_fork_epoch"],
+             heze_fork_epoch=result["network_params"]["heze_fork_epoch"],
++            eip8321_fork_epoch=result["network_params"]["eip8321_fork_epoch"],
++            eip8321_fork_version=result["network_params"]["eip8321_fork_version"],
+             frames_enabled=result["network_params"]["frames_enabled"],
+             network=result["network_params"]["network"],
+             min_validator_withdrawability_delay=result["network_params"][
+@@ -1939,6 +1959,8 @@ def default_network_params():
+         "fulu_fork_epoch": 0,
+         "gloas_fork_epoch": constants.FAR_FUTURE_EPOCH,
+         "heze_fork_epoch": constants.FAR_FUTURE_EPOCH,
++        "eip8321_fork_epoch": constants.FAR_FUTURE_EPOCH,
++        "eip8321_fork_version": "0xe8321101",
+         "frames_enabled": False,
+         "network_sync_base_url": "https://snapshots.ethpandaops.io/",
+         "force_snapshot_sync": False,
+@@ -2028,6 +2050,8 @@ def default_minimal_network_params():
+         "fulu_fork_epoch": 0,
+         "gloas_fork_epoch": constants.FAR_FUTURE_EPOCH,
+         "heze_fork_epoch": constants.FAR_FUTURE_EPOCH,
++        "eip8321_fork_epoch": constants.FAR_FUTURE_EPOCH,
++        "eip8321_fork_version": "0xe8321101",
+         "frames_enabled": False,
+         "network_sync_base_url": "https://snapshots.ethpandaops.io/",
+         "force_snapshot_sync": False,
+diff --git a/src/package_io/sanity_check.star b/src/package_io/sanity_check.star
+index a802b9e..f31fae4 100644
+--- a/src/package_io/sanity_check.star
++++ b/src/package_io/sanity_check.star
+@@ -251,6 +251,8 @@ SUBCATEGORY_PARAMS = {
+         "fulu_fork_epoch",
+         "gloas_fork_epoch",
+         "heze_fork_epoch",
++        "eip8321_fork_epoch",
++        "eip8321_fork_version",
+         "frames_enabled",
+         "network_sync_base_url",
+         "force_snapshot_sync",
+diff --git a/src/prelaunch_data_generator/el_cl_genesis/el_cl_genesis_generator.star b/src/prelaunch_data_generator/el_cl_genesis/el_cl_genesis_generator.star
+index e52132a..46bd599 100644
+--- a/src/prelaunch_data_generator/el_cl_genesis/el_cl_genesis_generator.star
++++ b/src/prelaunch_data_generator/el_cl_genesis/el_cl_genesis_generator.star
+@@ -69,10 +69,17 @@ def generate_el_cl_genesis_data(
+ 
+     files[GENESIS_VALUES_PATH] = genesis_generation_config_artifact_name
+ 
++    feature_config = ""
++    if network_params.eip8321_fork_epoch != constants.FAR_FUTURE_EPOCH:
++        feature_config = "printf '\\nEIP8321_FORK_EPOCH: {0}\\nEIP8321_FORK_VERSION: {1}\\n' >> /data/metadata/config.yaml && ".format(
++            network_params.eip8321_fork_epoch,
++            network_params.eip8321_fork_version,
++        )
++
+     genesis = plan.run_sh(
+         name="run-generate-genesis",
+         description="Creating genesis",
+-        run="cp /opt/values.env /config/values.env && ./entrypoint.sh all && mkdir /network-configs && mv /data/metadata/* /network-configs/ && mv /data/parsed /network-configs/parsed",
++        run="cp /opt/values.env /config/values.env && ./entrypoint.sh all && " + feature_config + "mkdir /network-configs && mv /data/metadata/* /network-configs/ && mv /data/parsed /network-configs/parsed",
+         image=image,
+         files=files,
+         store=[
+diff --git a/src/vc/prysm.star b/src/vc/prysm.star
+index 770a967..bb85555 100644
+--- a/src/vc/prysm.star
++++ b/src/vc/prysm.star
+@@ -82,6 +82,8 @@ def get_config(
+ 
+     if use_beacon_api:
+         cmd.append("--beacon-rest-api-provider=" + ",".join(beacon_http_urls))
++        if network_params.eip8321_fork_epoch != constants.FAR_FUTURE_EPOCH:
++            cmd.append("--beacon-rpc-provider=" + cl_context.beacon_grpc_url)
+         if "--enable-beacon-rest-api" not in participant.vc_extra_params:
+             cmd.append("--enable-beacon-rest-api")
+     else:

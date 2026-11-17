@@ -1,7 +1,7 @@
 use crate::request_auth_cache::RequestAuthCache;
 use beacon_node_fallback::{ApiTopic, BeaconNodeFallback, Error as FallbackError, Errors};
 use bls::PublicKeyBytes;
-use bls::{Signature, SignatureBytes};
+use bls::SignatureBytes;
 use builder_store::BuilderStore;
 use builder_types::SignedRequestAuth;
 use eth2::BeaconNodeHttpClient;
@@ -28,6 +28,17 @@ use types::{
     Graffiti, Hash256, KzgProofs, Slot, consts::gloas::BUILDER_INDEX_SELF_BUILD,
 };
 use validator_store::{Error as ValidatorStoreError, SignedBlock, UnsignedBlock, ValidatorStore};
+
+/// The `hash_chain_reveal` of a produced block, or `None` before EIP-8321.
+///
+/// [New in Eip8321: EIP-8321]
+fn unsigned_block_hash_chain_reveal<E: EthSpec>(block: &UnsignedBlock<E>) -> Option<Hash256> {
+    let reveal = match block {
+        UnsignedBlock::Full(contents) => contents.block().body().hash_chain_reveal().ok().copied(),
+        UnsignedBlock::Blinded(block) => block.body().hash_chain_reveal().ok().copied(),
+    };
+    reveal.filter(|reveal| !reveal.is_zero())
+}
 
 /// Hard deadline on signing a single builder's request auth during block production.
 ///
@@ -717,42 +728,38 @@ impl<S: ValidatorStore + 'static, T: SlotClock + 'static> BlockService<S, T> {
 
         let fork_name = self.chain_spec.fork_name_at_slot::<S::E>(slot);
 
-        // EIP-8321: a validator with an activated hash-chain commitment reveals a
-        // preimage instead of a BLS signature, and its BLS reveal must be the G2 point at infinity.
+        // EIP-8321: a validator with an activated hash-chain commitment reveals a preimage
+        // instead of a BLS signature (the block's BLS reveal becomes the G2 point at infinity).
+        //
+        // The activation epoch is only estimated locally from when the registration was
+        // submitted: if it was included in a later epoch, the on-chain activation is later too.
+        // Always sign the legacy BLS reveal as well, so the beacon node can use whichever reveal
+        // the proposer's on-chain commitment requires. The preimage is only consumed below if the
+        // produced block actually carries it.
         let hash_chain_reveal = self.hash_chain_reveal(&validator_pubkey, slot, fork_name);
 
-        let randao_reveal: SignatureBytes = if hash_chain_reveal.is_some() {
-            let signature = Signature::infinity().map_err(|e| {
-                BlockError::Recoverable(format!(
-                    "Unable to construct the point-at-infinity randao reveal: {:?}",
+        let randao_reveal: SignatureBytes = match self
+            .validator_store
+            .randao_reveal(validator_pubkey, slot.epoch(S::E::slots_per_epoch()))
+            .await
+        {
+            Ok(signature) => signature.into(),
+            Err(ValidatorStoreError::UnknownPubkey(pubkey)) => {
+                // A pubkey can be missing when a validator was recently removed
+                // via the API.
+                warn!(
+                    info = "a validator may have recently been removed from this VC",
+                    ?pubkey,
+                    ?slot,
+                    "Missing pubkey for block randao"
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(BlockError::Recoverable(format!(
+                    "Unable to produce randao reveal signature: {:?}",
                     e
-                ))
-            })?;
-            signature.into()
-        } else {
-            match self
-                .validator_store
-                .randao_reveal(validator_pubkey, slot.epoch(S::E::slots_per_epoch()))
-                .await
-            {
-                Ok(signature) => signature.into(),
-                Err(ValidatorStoreError::UnknownPubkey(pubkey)) => {
-                    // A pubkey can be missing when a validator was recently removed
-                    // via the API.
-                    warn!(
-                        info = "a validator may have recently been removed from this VC",
-                        ?pubkey,
-                        ?slot,
-                        "Missing pubkey for block randao"
-                    );
-                    return Ok(());
-                }
-                Err(e) => {
-                    return Err(BlockError::Recoverable(format!(
-                        "Unable to produce randao reveal signature: {:?}",
-                        e
-                    )));
-                }
+                )));
             }
         };
 
@@ -968,6 +975,19 @@ impl<S: ValidatorStore + 'static, T: SlotClock + 'static> BlockService<S, T> {
         };
 
         info!(slot = slot.as_u64(), "Received unsigned block");
+
+        // [New in Eip8321: EIP-8321] Only a block that carries the preimage advances the
+        // on-chain commitment, so only then may the local chain move to the next link.
+        let hash_chain_reveal = hash_chain_reveal.filter(|reveal| {
+            let used = unsigned_block_hash_chain_reveal(&unsigned_block) == Some(*reveal);
+            if !used {
+                info!(
+                    slot = slot.as_u64(),
+                    "Hash-chain commitment not active on-chain yet; proposed with the BLS reveal"
+                );
+            }
+            used
+        });
         if proposer_index != Some(block_proposer) {
             return Err(BlockError::Recoverable(
                 "Proposer index does not match block proposer. Beacon chain re-orged".to_string(),
