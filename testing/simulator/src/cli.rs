@@ -76,6 +76,76 @@ pub fn cli_app() -> Command {
                 ),
         )
         .subcommand(
+            Command::new("eip8321-sim")
+                .about(
+                    "Runs a post-Merge simulation with `n` beacon nodes and validator clients \
+                    through the Gloas, Heze and EIP-8321 (hash-chain RANDAO) forks using `mock-el`. \
+                    Checks that every validator registers a hash-chain commitment, that proposers \
+                    switch to hash-chain reveals once their commitment activates, that all nodes \
+                    (including one that syncs late) agree on the canonical chain, and that the \
+                    chain finalizes past the fork.",
+                )
+                .arg(
+                    Arg::new("nodes")
+                        .short('n')
+                        .long("nodes")
+                        .action(ArgAction::Set)
+                        .default_value("2")
+                        .help("Number of beacon nodes"),
+                )
+                .arg(
+                    Arg::new("proposer-nodes")
+                        .short('p')
+                        .long("proposer-nodes")
+                        .action(ArgAction::Set)
+                        .default_value("1")
+                        .help("Number of proposer-only beacon nodes"),
+                )
+                .arg(
+                    Arg::new("validators-per-node")
+                        .short('v')
+                        .long("validators-per-node")
+                        .action(ArgAction::Set)
+                        .default_value("20")
+                        .help("Number of validators"),
+                )
+                .arg(
+                    Arg::new("speed-up-factor")
+                        .short('s')
+                        .long("speed-up-factor")
+                        .action(ArgAction::Set)
+                        .default_value("2")
+                        .help("Speed up factor. Please use a divisor of 6."),
+                )
+                .arg(
+                    Arg::new("debug-level")
+                        .short('d')
+                        .long("debug-level")
+                        .action(ArgAction::Set)
+                        .default_value("debug")
+                        .help("Set the severity level of the logs."),
+                )
+                .arg(
+                    Arg::new("continue-after-checks")
+                        .short('c')
+                        .long("continue_after_checks")
+                        .action(ArgAction::SetTrue)
+                        .help("Continue after checks (default false)"),
+                )
+                .arg(
+                    Arg::new("log-dir")
+                        .long("log-dir")
+                        .action(ArgAction::Set)
+                        .help("Set a path for logs of beacon nodes that run in this simulation."),
+                )
+                .arg(
+                    Arg::new("disable-stdout-logging")
+                        .long("disable-stdout-logging")
+                        .action(ArgAction::SetTrue)
+                        .help("Disables stdout logging."),
+                ),
+        )
+        .subcommand(
             Command::new("fallback-sim")
                 .about(
                     "Runs a Beacon Chain simulation with `c` validator clients where each VC is \
