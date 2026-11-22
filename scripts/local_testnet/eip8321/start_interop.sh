@@ -66,19 +66,26 @@ if [ "$LOCAL_DEPS" = true ]; then
 fi
 
 # --- images ------------------------------------------------------------------------------
+# Lighthouse: a plain local tag (no `/`, e.g. `lighthouse:eip8321-minimal`) is built from this
+# checkout unless `-b false`; any `<owner>/<name>` image (e.g. the published
+# `ghcr.io/martinkadev/lighthouse:eip8321`) is pulled instead.
 LH_IMAGE=$(yq eval '[.participants[] | select(.cl_type == "lighthouse") | .cl_image][0]' "$NETWORK_PARAMS_FILE")
-if [ "$LH_IMAGE" != "null" ]; then
-  if [ "$BUILD_IMAGE" = true ]; then
-    echo "Building $LH_IMAGE (portable,spec-minimal)"
-    docker build --build-arg FEATURES=portable,spec-minimal -f "$ROOT_DIR/Dockerfile" -t "$LH_IMAGE" "$ROOT_DIR"
-  fi
+if [ "$LH_IMAGE" != "null" ] && [ "$BUILD_IMAGE" = true ] && [[ "$LH_IMAGE" != */* ]]; then
+  echo "Building $LH_IMAGE (portable,spec-minimal)"
+  docker build --build-arg FEATURES=portable,spec-minimal -f "$ROOT_DIR/Dockerfile" -t "$LH_IMAGE" "$ROOT_DIR"
 fi
 
-for image in $(yq eval '.participants[] | select(.cl_type == "prysm") | (.cl_image, .vc_image)' "$NETWORK_PARAMS_FILE" | sort -u); do
-  if ! docker image inspect "$image" &>/dev/null; then
-    echo "Prysm image $image not found locally." >&2
-    echo "Build it from https://github.com/Humantvis/prysm/tree/eip-8321-heze" >&2
-    echo "(testing/devnet/eip8321/Build.ps1 or build-linux.sh), see README.md." >&2
+# Every other image must exist locally or be pullable.
+for image in $(yq eval '.participants[] | (.cl_image, .vc_image, .el_image) | select(. != null)' "$NETWORK_PARAMS_FILE" | sort -u); do
+  if [[ "$image" == *"<"* ]]; then
+    echo "Fill in the <...> placeholders in $NETWORK_PARAMS_FILE first ($image)." >&2
+    exit 1
+  fi
+  docker image inspect "$image" &>/dev/null && continue
+  echo "Pulling $image"
+  if ! docker pull "$image"; then
+    echo "Image $image is neither available locally nor pullable." >&2
+    echo "Ask the team that owns it for the image (docker save/load or a registry), see README.md." >&2
     exit 1
   fi
 done

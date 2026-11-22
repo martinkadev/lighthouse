@@ -2,6 +2,11 @@
 
 An open-source Ethereum consensus client, written in Rust and maintained by Sigma Prime.
 
+> **This fork implements [EIP-8321](https://eips.ethereum.org/EIPS/eip-8321) (hash-chain RANDAO)**
+> on the `eip8321` branch, as a feature fork after Heze. Docker image:
+> `ghcr.io/martinkadev/lighthouse:eip8321`. To run an interop devnet with your own client, see
+> [`scripts/local_testnet/eip8321`](scripts/local_testnet/eip8321/README.md#interop-with-your-client).
+
 [![Book Status]][Book Link] [![Chat Badge]][Chat Link]
 
 [Chat Badge]: https://img.shields.io/badge/chat-discord-%237289da
