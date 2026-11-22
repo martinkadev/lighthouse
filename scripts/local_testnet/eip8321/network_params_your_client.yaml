@@ -1,0 +1,44 @@
+# EIP-8321 interop template: the published Lighthouse image plus your client.
+#
+# 1. Replace <your-client> and the <...> images (amd64, minimal preset).
+# 2. If your client cannot propose or register yet, set its validator_count to 0
+#    (follower mode) and run check_interop.py with --require-clients 1.
+# 3. ./start_interop.sh -n network_params_your_client.yaml -e eip8321-yours
+#    python3 check_interop.py --enclave eip8321-yours --params network_params_your_client.yaml
+#
+# Small: 2 consensus + 2 execution nodes, so it fits on an ordinary laptop. Raise `count` for a
+# bigger network. Keep everything under network_params identical for every participant.
+participants:
+  - el_type: geth
+    el_image: ethpandaops/geth:heze-devnet-2-66af2fe
+    cl_type: lighthouse
+    cl_image: ghcr.io/martinkadev/lighthouse:eip8321
+    vc_image: ghcr.io/martinkadev/lighthouse:eip8321
+    supernode: true
+    count: 1
+    validator_count: 64
+
+  - el_type: geth
+    el_image: ethpandaops/geth:heze-devnet-2-66af2fe
+    cl_type: <your-client>                        # prysm, teku, lodestar, nimbus, grandine, ...
+    cl_image: <your-beacon-image>
+    vc_image: <your-validator-image>
+    # cl_extra_params: []                         # flags your beacon node needs
+    # vc_extra_params: []                         # flags your validator client needs
+    supernode: true
+    count: 1
+    validator_count: 64
+
+network_params:
+  preset: minimal
+  genesis_delay: 120
+  electra_fork_epoch: 0
+  fulu_fork_epoch: 0
+  gloas_fork_epoch: 0
+  heze_fork_epoch: 0
+  eip8321_fork_epoch: 4
+  eip8321_fork_version: '0xe8321101'
+
+global_log_level: debug
+additional_services: []
+wait_for_finalization: false

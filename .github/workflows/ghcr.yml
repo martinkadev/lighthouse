@@ -4,11 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Extra tag to publish alongside pr-eip8321"
+        description: "Extra tag to publish alongside the branch and sha tags"
         required: false
         default: ""
   push:
     branches:
+      - eip8321
       - 'pr/eip8321'
       - unstable
 
@@ -57,7 +58,10 @@ jobs:
       - name: Resolve image name and tags
         id: meta
         run: |
-          image="${REGISTRY}/$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          # One image per binary: ghcr.io/<owner>/lighthouse and ghcr.io/<owner>/lcli.
+          # (Both used to push to ghcr.io/<owner>/<repo>, so lcli overwrote lighthouse.)
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          image="${REGISTRY}/${owner}/${{ matrix.binary }}"
           branch="$(echo "${GITHUB_REF_NAME}" | tr '/' '-')"
           short_sha="$(git rev-parse --short HEAD)"
           {

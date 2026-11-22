@@ -14,6 +14,77 @@ hash-chain reveals appear from epoch 7 (slot 56).
 | `network_params_lighthouse.yaml` | 3 × Lighthouse + Geth, 192 validators. Baseline: run this first. |
 | `network_params_interop.yaml` | 2 × Lighthouse and 2 × Prysm, each with its own VC and Geth, 64 validators per node. Both clients propose, attest and register, so each must import the other's blocks on the legacy BLS path and on the hash-chain path. |
 | `network_params_lighthouse_follower.yaml` | Prysm proposes everything, Lighthouse only follows. Isolates "Lighthouse rejects Prysm" from "Prysm rejects Lighthouse". |
+| `network_params_your_client.yaml` | Template for other teams: the published Lighthouse image plus one node of your client. |
+
+## Interop with your client
+
+**Tested so far:** Lighthouse ↔ Prysm
+([Humantvis/prysm@eip-8321-heze](https://github.com/Humantvis/prysm/tree/eip-8321-heze)):
+both clients propose, register and reveal, and registrations cross clients over gossip. See
+[VALIDATION.md](VALIDATION.md). No other client has been tested against Lighthouse yet.
+
+### Your implementation must
+
+- build on **Heze** (`heze-devnet-2`) with EIP-8321 as a **separate fork after Heze**, so Heze
+  blocks and state are unchanged;
+- follow the pinned consensus-specs feature spec, i.e. pass the EIP-8321 vectors from
+  [`lukassta/consensus-specs` `v1.7.0-eip8321.1`](https://github.com/lukassta/consensus-specs/releases/tag/v1.7.0-eip8321.1).
+  Lighthouse's `testing/ef_tests/download_eip8321_vectors.sh` fetches and checksums them. Where
+  the EIP web page and the spec differ, the spec wins (see the list below);
+- read `EIP8321_FORK_EPOCH` and `EIP8321_FORK_VERSION` from the network's `config.yaml`.
+
+Passing the vectors is a good sign, but they do not cover networking. Lighthouse passed every
+vector and still had two gossip bugs that only a live devnet exposed (see VALIDATION.md), so
+the devnet run is the real test.
+
+### Versions
+
+| Component | Version |
+| --- | --- |
+| Lighthouse image | `ghcr.io/martinkadev/lighthouse:eip8321` (latest `eip8321` branch) or `ghcr.io/martinkadev/lighthouse:sha-<commit>` (pinned); supports the minimal preset |
+| Execution client | `ethpandaops/geth:heze-devnet-2-66af2fe` |
+| ethereum-package | `5795b77e65235ad223d4d3b413b2739190bf60cc` + `ethereum-package.patch` (applied by `start_interop.sh`) |
+| Kurtosis CLI | 1.22.2 |
+
+### Network parameters
+
+Every node in one network must use the same values. Ours are:
+
+| Parameter | Value |
+| --- | --- |
+| Preset | `minimal` |
+| Fork schedule | Electra, Fulu, Gloas and Heze at genesis; EIP-8321 at epoch 4 |
+| `EIP8321_FORK_VERSION` | `0xe8321101` |
+
+Fork epoch and execution client are per-network choices: another epoch (e.g. 5) or another
+execution client works if every participant uses it.
+
+### Steps
+
+1. Build your beacon node and validator client images for **amd64** with the **minimal**
+   preset.
+2. Copy `network_params_your_client.yaml`, set `cl_type` and your images. If your client cannot
+   propose or register yet, set its `validator_count: 0`: Lighthouse then produces every block
+   and your node follows and verifies (follower mode).
+3. Run it and check it:
+
+   ```sh
+   ./start_interop.sh -n network_params_your_client.yaml -e eip8321-yours
+   # wait ~10 minutes (past epoch 10)
+   python3 check_interop.py --enclave eip8321-yours --params network_params_your_client.yaml
+   # follower mode: add --require-clients 1
+   ```
+
+4. Send us the `check_interop.py` output and the `eip8321-evidence-*` folder, or open an issue.
+
+### Client support in ethereum-package
+
+Your client must be supported by ethereum-package (Lighthouse, Prysm, Teku, Lodestar, Nimbus
+and Grandine are). If it needs extra flags for EIP-8321, use `cl_extra_params` /
+`vc_extra_params`. If it needs launcher changes, extend `ethereum-package.patch` and send us
+the change. The Prysm team needed this for their validator client, and the current patch
+already contains it.
+
 
 ## What has to match between clients
 
@@ -43,16 +114,22 @@ Docker, [Kurtosis CLI](https://docs.kurtosis.com/install/), `git`, `yq`, Python 
 
 ## Images
 
-Lighthouse is built by `start_interop.sh` (`portable,spec-minimal`). To build it yourself:
+Every push to the `eip8321` branch publishes the Lighthouse image to
+`ghcr.io/martinkadev/lighthouse:eip8321` and `ghcr.io/martinkadev/lighthouse:sha-<commit>`
+(`.github/workflows/ghcr.yml`). `start_interop.sh` pulls it when a YAML file uses that name.
+
+With a plain local tag such as `lighthouse:eip8321-minimal` (the default in the repository's own
+YAML files), `start_interop.sh` builds the image from this checkout (`portable,spec-minimal`)
+unless `-b false` is given. To build it yourself:
 
 ```sh
 docker build --build-arg FEATURES=portable,spec-minimal -t lighthouse:eip8321-minimal .
 ```
 
-Prysm images come from the Prysm team's branch (`testing/devnet/eip8321/Build.ps1`, which runs
-`build-linux.sh` with Bazel `--config=minimal`) and must be tagged
-`bct/prysm-beacon:eip8321-minimal` and `bct/prysm-validator:eip8321-minimal`, or edit
-`cl_image`/`vc_image` in the YAML files.
+Images of other clients come from their teams. `start_interop.sh` uses them if they exist
+locally (e.g. after `docker load`) and otherwise tries `docker pull`. The Prysm YAML files expect
+`bct/prysm-beacon:eip8321-minimal` and `bct/prysm-validator:eip8321-minimal`; edit
+`cl_image`/`vc_image` for other names.
 
 ## ethereum-package
 
