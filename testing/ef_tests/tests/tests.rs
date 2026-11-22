@@ -164,37 +164,37 @@ fn random() {
 }
 
 #[test]
-#[cfg(not(feature = "fake_crypto"))]
+#[cfg(not(any(feature = "fake_crypto", feature = "eip8321_tests")))]
 fn bls_aggregate() {
     BlsAggregateSigsHandler::default().run();
 }
 
 #[test]
-#[cfg(not(feature = "fake_crypto"))]
+#[cfg(not(any(feature = "fake_crypto", feature = "eip8321_tests")))]
 fn bls_sign() {
     BlsSignMsgHandler::default().run();
 }
 
 #[test]
-#[cfg(not(feature = "fake_crypto"))]
+#[cfg(not(any(feature = "fake_crypto", feature = "eip8321_tests")))]
 fn bls_verify() {
     BlsVerifyMsgHandler::default().run();
 }
 
 #[test]
-#[cfg(not(feature = "fake_crypto"))]
+#[cfg(not(any(feature = "fake_crypto", feature = "eip8321_tests")))]
 fn bls_batch_verify() {
     BlsBatchVerifyHandler::default().run();
 }
 
 #[test]
-#[cfg(not(feature = "fake_crypto"))]
+#[cfg(not(any(feature = "fake_crypto", feature = "eip8321_tests")))]
 fn bls_aggregate_verify() {
     BlsAggregateVerifyHandler::default().run();
 }
 
 #[test]
-#[cfg(not(feature = "fake_crypto"))]
+#[cfg(not(any(feature = "fake_crypto", feature = "eip8321_tests")))]
 fn bls_fast_aggregate_verify() {
     BlsFastAggregateVerifyHandler::default().run();
 }
@@ -1014,43 +1014,90 @@ fn gossip_randao_commitment_registration() {
     GossipValidationHandler::<Spec>::new("gossip_randao_commitment_registration").run();
 }
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_data_column_sidecar() {
-//     GossipValidationHandler::<Spec>::new("gossip_data_column_sidecar").run();
-// }
+#[test]
+fn gossip_data_column_sidecar() {
+    GossipValidationHandler::<Spec>::new("gossip_data_column_sidecar").run();
+}
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_execution_payload_bid() {
-//     GossipValidationHandler::<Spec>::new("gossip_execution_payload_bid").run();
-// }
+#[test]
+fn gossip_execution_payload_bid() {
+    GossipValidationHandler::<Spec>::new("gossip_execution_payload_bid").run();
+}
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_execution_payload_envelope() {
-//     GossipValidationHandler::<Spec>::new("gossip_execution_payload_envelope").run();
-// }
+#[test]
+fn gossip_execution_payload_envelope() {
+    GossipValidationHandler::<Spec>::new("gossip_execution_payload_envelope").run();
+}
 
 #[test]
 fn gossip_inclusion_list() {
     GossipValidationHandler::<Spec>::new("gossip_inclusion_list").run();
 }
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_partial_data_column_sidecar() {
-//     GossipValidationHandler::<Spec>::new("gossip_partial_data_column_sidecar").run();
-// }
+#[test]
+fn gossip_partial_data_column_sidecar() {
+    GossipValidationHandler::<Spec>::new("gossip_partial_data_column_sidecar").run();
+}
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_payload_attestation_message() {
-//     GossipValidationHandler::<Spec>::new("gossip_payload_attestation_message").run();
-// }
+#[test]
+fn gossip_payload_attestation_message() {
+    GossipValidationHandler::<Spec>::new("gossip_payload_attestation_message").run();
+}
 
-// TODO(EIP-8321): enable once the topic is implemented in `GossipTopicKind`.
-// #[test]
-// fn gossip_proposer_preferences() {
-//     GossipValidationHandler::<Spec>::new("gossip_proposer_preferences").run();
-// }
+#[test]
+fn gossip_proposer_preferences() {
+    GossipValidationHandler::<Spec>::new("gossip_proposer_preferences").run();
+}
+
+#[test]
+#[cfg(all(
+    feature = "eip8321_tests",
+    feature = "spec-minimal",
+    not(feature = "fake_crypto")
+))]
+fn bulk_randao_registrations_reject_invalid_signatures() {
+    use state_processing::block_signature_verifier::BlockSignatureVerifier;
+    use state_processing::signature_sets::get_pubkey_from_state;
+    use std::borrow::Cow;
+
+    fn verify(
+        state: &BeaconState<Spec>,
+        block: &SignedBeaconBlock<Spec>,
+        spec: &ChainSpec,
+    ) -> bool {
+        let mut verifier = BlockSignatureVerifier::new(
+            state,
+            |index| get_pubkey_from_state(state, index),
+            |pubkey| pubkey.decompress().ok().map(Cow::Owned),
+            spec,
+        );
+        verifier
+            .include_randao_commitment_registrations(block)
+            .unwrap();
+        verifier.verify().is_ok()
+    }
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("consensus-spec-tests/tests/minimal/eip8321/sanity/blocks/pyspec_tests/randao_commitment_registration_lifecycle");
+    let read = |name: &str| {
+        snap::raw::Decoder::new()
+            .decompress_vec(&std::fs::read(path.join(name)).unwrap())
+            .unwrap()
+    };
+    let spec = testing_spec::<Spec>(ForkName::Eip8321);
+    let state = BeaconState::<Spec>::from_ssz_bytes(&read("pre.ssz_snappy"), &spec).unwrap();
+    let mut block =
+        SignedBeaconBlock::<Spec>::from_ssz_bytes(&read("blocks_0.ssz_snappy"), &spec).unwrap();
+    assert!(verify(&state, &block, &spec));
+
+    // Verify only the operation signatures, so invalidating the outer proposal signature
+    // cannot accidentally make this negative test pass.
+    match block.message_mut() {
+        BeaconBlockRefMut::Eip8321(block) => {
+            assert!(!block.body.randao_commitment_registrations.is_empty());
+            block.body.randao_commitment_registrations[0].signature = bls::Signature::empty();
+        }
+        _ => panic!("expected EIP-8321 lifecycle fixture"),
+    }
+    assert!(!verify(&state, &block, &spec));
+}

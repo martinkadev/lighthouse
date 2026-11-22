@@ -90,8 +90,24 @@ impl TAggregatePublicKey<PublicKey> for AggregatePublicKey {
         GenericPublicKey::from_point(PublicKey(self.0))
     }
 
-    fn aggregate(_pubkeys: &[GenericPublicKey<PublicKey>]) -> Result<Self, Error> {
-        Ok(Self(INFINITY_PUBLIC_KEY))
+    fn aggregate(pubkeys: &[GenericPublicKey<PublicKey>]) -> Result<Self, Error> {
+        #[cfg(feature = "fake_crypto_real_pubkeys")]
+        {
+            use crate::blst_implementations::{
+                AggregatePublicKey as RealAggregate, PublicKey as RealPublicKey,
+            };
+            let real_pubkeys = pubkeys
+                .iter()
+                .map(|pubkey| RealPublicKey::deserialize(&pubkey.serialize()))
+                .collect::<Result<Vec<_>, _>>()?;
+            let aggregate = RealAggregate::aggregate(&real_pubkeys)?.to_public_key();
+            Ok(Self(aggregate.serialize()))
+        }
+        #[cfg(not(feature = "fake_crypto_real_pubkeys"))]
+        {
+            let _ = pubkeys;
+            Ok(Self(INFINITY_PUBLIC_KEY))
+        }
     }
 }
 

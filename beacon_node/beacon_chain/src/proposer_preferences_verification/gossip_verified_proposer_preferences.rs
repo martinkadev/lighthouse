@@ -37,14 +37,32 @@ pub(crate) fn verify_preferences_consistency<E: EthSpec>(
         return Err(ProposerPreferencesError::InvalidProposalEpoch { proposal_epoch });
     }
 
-    if proposal_slot <= current_slot {
+    Ok(())
+}
+
+fn verify_preferences_timing<E: EthSpec, S: SlotClock>(
+    preferences: &ProposerPreferences,
+    clock: &S,
+    spec: &ChainSpec,
+) -> Result<Slot, ProposerPreferencesError> {
+    let current_slot = clock
+        .now_with_future_tolerance(spec.maximum_gossip_clock_disparity())
+        .ok_or(ProposerPreferencesError::UnableToReadSlot)?;
+    verify_preferences_consistency::<E>(preferences, current_slot, spec)?;
+    let now = clock
+        .now_duration()
+        .ok_or(ProposerPreferencesError::UnableToReadSlot)?;
+    let deadline = clock
+        .start_of(preferences.proposal_slot)
+        .ok_or(ProposerPreferencesError::UnableToReadSlot)?
+        .saturating_add(spec.maximum_gossip_clock_disparity());
+    if now > deadline {
         return Err(ProposerPreferencesError::ProposalSlotAlreadyPassed {
-            proposal_slot,
+            proposal_slot: preferences.proposal_slot,
             current_slot,
         });
     }
-
-    Ok(())
+    Ok(current_slot)
 }
 
 pub struct GossipVerificationContext<'a, T: BeaconChainTypes> {
@@ -73,11 +91,6 @@ impl GossipVerifiedProposerPreferences {
         let proposal_slot = signed_preferences.message.proposal_slot;
         let dependent_root = signed_preferences.message.dependent_root;
         let validator_index = signed_preferences.message.validator_index;
-        let current_slot = ctx
-            .slot_clock
-            .now()
-            .ok_or(ProposerPreferencesError::UnableToReadSlot)?;
-
         if ctx
             .gossip_verified_proposer_preferences_cache
             .get_seen_validator(&proposal_slot, dependent_root, validator_index)
@@ -88,9 +101,9 @@ impl GossipVerifiedProposerPreferences {
             });
         }
 
-        verify_preferences_consistency::<T::EthSpec>(
+        verify_preferences_timing::<T::EthSpec, _>(
             &signed_preferences.message,
-            current_slot,
+            ctx.slot_clock,
             ctx.spec,
         )?;
 
@@ -101,7 +114,7 @@ impl GossipVerifiedProposerPreferences {
         let fork_choice_read = ctx.canonical_head.fork_choice_read_lock();
 
         let dependent_block = fork_choice_read
-            .get_block(&dependent_root)
+            .get_retained_block(&dependent_root)
             .ok_or(ProposerPreferencesError::DependentRootUnknown { dependent_root })?;
 
         // Ensure the dependent root block is before the start of the lookahead epoch.
@@ -118,7 +131,7 @@ impl GossipVerifiedProposerPreferences {
 
         // Look for at least one child that crosses the epoch boundary directly after `dependent_block`.
         let has_qualifying_child = fork_choice_read
-            .get_children(&dependent_root)
+            .get_retained_children(&dependent_root)
             .iter()
             .any(|child| child.slot >= lookahead_epoch.start_slot(T::EthSpec::slots_per_epoch()));
 
@@ -148,7 +161,7 @@ impl GossipVerifiedProposerPreferences {
                 let dependent_state_root = ctx
                     .canonical_head
                     .fork_choice_read_lock()
-                    .get_block(&dependent_root)
+                    .get_retained_block(&dependent_root)
                     .ok_or(ProposerPreferencesError::DependentRootUnknown { dependent_root })?
                     .state_root;
 
@@ -270,9 +283,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 mod tests {
     use types::{Address, ChainSpec, EthSpec, Hash256, ProposerPreferences, Slot, Spec};
 
-    use super::verify_preferences_consistency;
+    use super::{verify_preferences_consistency, verify_preferences_timing};
     use crate::proposer_preferences_verification::ProposerPreferencesError;
     use crate::test_utils::{fork_name_from_env, test_spec};
+    use slot_clock::SlotClock;
 
     type E = Spec;
 
@@ -328,7 +342,11 @@ mod tests {
         let current_slot = Slot::new(10);
         let prefs = make_preferences(Slot::new(9), 0);
 
-        let result = verify_preferences_consistency::<E>(&prefs, current_slot, &spec());
+        let config = spec();
+        let clock =
+            slot_clock::TestingSlotClock::from_spec::<E>(std::time::Duration::ZERO, &config);
+        clock.set_slot(current_slot.as_u64());
+        let result = verify_preferences_timing::<E, _>(&prefs, &clock, &config);
         assert!(matches!(
             result,
             Err(ProposerPreferencesError::ProposalSlotAlreadyPassed { .. })
@@ -343,9 +361,17 @@ mod tests {
         let current_slot = Slot::new(10);
         let prefs = make_preferences(Slot::new(10), 0);
 
-        let result = verify_preferences_consistency::<E>(&prefs, current_slot, &spec());
+        let config = spec();
+        let clock =
+            slot_clock::TestingSlotClock::from_spec::<E>(std::time::Duration::ZERO, &config);
+        clock.set_slot(current_slot.as_u64());
+        let result = verify_preferences_timing::<E, _>(&prefs, &clock, &config);
+        assert!(result.is_ok());
+        clock.advance_time(config.maximum_gossip_clock_disparity());
+        assert!(verify_preferences_timing::<E, _>(&prefs, &clock, &config).is_ok());
+        clock.advance_time(std::time::Duration::from_nanos(1));
         assert!(matches!(
-            result,
+            verify_preferences_timing::<E, _>(&prefs, &clock, &config),
             Err(ProposerPreferencesError::ProposalSlotAlreadyPassed { .. })
         ));
     }

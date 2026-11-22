@@ -987,8 +987,9 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
             return Err(BlockError::DuplicateFullyImported(block_root));
         }
 
-        // Do not process a block that is known to be invalid.
+        // Do not process a block or parent that is known to be invalid.
         chain.check_invalid_block_roots(block_root)?;
+        chain.check_invalid_block_roots(block.parent_root())?;
 
         // Do not process a block that doesn't descend from the finalized root.
         //

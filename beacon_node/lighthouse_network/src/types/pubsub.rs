@@ -155,10 +155,23 @@ impl DataTransform for SnappyTransform {
 }
 
 impl<E: EthSpec> PubsubMessage<E> {
-    /// Returns the topics that each pubsub message will be sent across, given a supported
-    /// gossipsub encoding and fork version.
-    pub fn topics(&self, encoding: GossipEncoding, fork_version: [u8; 4]) -> Vec<GossipTopic> {
-        vec![GossipTopic::new(self.kind(), encoding, fork_version)]
+    /// Returns the topics that each pubsub message will be sent across.
+    pub fn topics(&self, encoding: GossipEncoding, fork_context: &ForkContext) -> Vec<GossipTopic> {
+        // Publish block data on the fork of the block it describes. The network's current
+        // fork can still be the old fork when a block is published at the activation slot.
+        let slot = match self {
+            Self::BeaconBlock(block) => Some(block.slot()),
+            Self::DataColumnSidecar(sidecar) => Some(sidecar.1.slot()),
+            Self::ExecutionPayload(envelope) => Some(envelope.message.slot()),
+            Self::LightClientFinalityUpdate(update) => Some(update.get_attested_header_slot()),
+            Self::LightClientOptimisticUpdate(update) => Some(update.get_slot()),
+            _ => None,
+        };
+        let fork_digest = slot.map_or_else(
+            || fork_context.current_fork_digest(),
+            |slot| fork_context.context_bytes(slot.epoch(E::slots_per_epoch())),
+        );
+        vec![GossipTopic::new(self.kind(), encoding, fork_digest)]
     }
 
     /// Returns the kind of gossipsub topic associated with the message.
@@ -747,6 +760,31 @@ mod tests {
                 "gossip must preserve the {fork} block variant"
             );
         }
+    }
+
+    #[test]
+    fn beacon_block_topics_follow_block_slot_at_fork() {
+        let mut spec = pre_gloas_spec();
+        let fork_epoch = Epoch::new(1);
+        spec.gloas_fork_epoch = Some(fork_epoch);
+        let fork_context = ForkContext::new::<E>(Slot::new(0), Hash256::ZERO, &spec);
+        assert_eq!(fork_context.current_fork_name(), ForkName::Fulu);
+
+        let mut block = BeaconBlock::<E>::empty(&ForkName::Gloas.make_genesis_spec(spec));
+        *block.slot_mut() = fork_epoch.start_slot(E::slots_per_epoch());
+        let block = SignedBeaconBlock::from_block(block, Signature::empty());
+        let message = PubsubMessage::BeaconBlock(Arc::new(block));
+        let encoding = GossipEncoding::default();
+        let topics = message.topics(encoding.clone(), &fork_context);
+        let [topic] = topics.as_slice() else {
+            panic!("expected one beacon block topic");
+        };
+        assert_eq!(topic.fork_digest, fork_context.context_bytes(fork_epoch));
+        let topic_hash = TopicHash::from_raw(String::from(topic.clone()));
+        assert_eq!(
+            PubsubMessage::decode(&topic_hash, &message.encode(encoding), &fork_context),
+            Ok(message)
+        );
     }
 
     /// A spec with every fork up to Fulu scheduled at genesis.

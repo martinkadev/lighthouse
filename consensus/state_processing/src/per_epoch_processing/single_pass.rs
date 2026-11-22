@@ -158,6 +158,33 @@ pub fn process_epoch_single_pass<E: EthSpec>(
     spec: &ChainSpec,
     conf: SinglePassConfig,
 ) -> Result<SinglePassEpochResult<E>, Error> {
+    process_epoch_single_pass_inner(state, spec, conf, false)
+}
+
+/// Compute raw attestation reward deltas, including the genesis epoch, for reference tests.
+/// Production epoch processing still skips genesis rewards through the entry point above.
+pub fn process_rewards_for_test_deltas<E: EthSpec>(
+    state: &mut BeaconState<E>,
+    spec: &ChainSpec,
+) -> Result<(), Error> {
+    process_epoch_single_pass_inner(
+        state,
+        spec,
+        SinglePassConfig {
+            rewards_and_penalties: true,
+            ..SinglePassConfig::disable_all()
+        },
+        true,
+    )?;
+    Ok(())
+}
+
+fn process_epoch_single_pass_inner<E: EthSpec>(
+    state: &mut BeaconState<E>,
+    spec: &ChainSpec,
+    conf: SinglePassConfig,
+    include_genesis_rewards: bool,
+) -> Result<SinglePassEpochResult<E>, Error> {
     initialize_epoch_cache(state, spec)?;
     initialize_progressive_balances_cache(state, spec)?;
     state.build_exit_cache(spec)?;
@@ -283,9 +310,9 @@ pub fn process_epoch_single_pass<E: EthSpec>(
             current_epoch_participation,
         };
 
-        if current_epoch != E::genesis_epoch() {
+        if current_epoch != E::genesis_epoch() || include_genesis_rewards {
             // `process_inactivity_updates`
-            if conf.inactivity_updates {
+            if conf.inactivity_updates && current_epoch != E::genesis_epoch() {
                 process_single_inactivity_update(
                     &mut inactivity_score,
                     validator_info,

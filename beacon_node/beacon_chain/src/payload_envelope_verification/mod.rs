@@ -207,6 +207,8 @@ impl<E: EthSpec> AvailableExecutedEnvelope<E> {
 
 #[derive(Debug, AsRefStr)]
 pub enum EnvelopeError {
+    /// The envelope references a beacon block known to be invalid.
+    KnownInvalidBlock { block_root: Hash256 },
     /// The envelope's block root is unknown.
     BlockRootUnknown { block_root: Hash256 },
     /// A validated envelope for this `block_root` has already been seen from the
@@ -285,7 +287,8 @@ impl std::fmt::Display for EnvelopeError {
 impl EnvelopeError {
     pub fn penalize_peer(&self) -> bool {
         match self {
-            EnvelopeError::BadSignature
+            EnvelopeError::KnownInvalidBlock { .. }
+            | EnvelopeError::BadSignature
             | EnvelopeError::BuilderIndexMismatch { .. }
             | EnvelopeError::SlotMismatch { .. }
             | EnvelopeError::BlockHashMismatch { .. }

@@ -503,8 +503,9 @@ impl<E: EthSpec, T: EpochTransition<E>> Case for EpochProcessing<E, T> {
                     % spec.epochs_per_sync_committee_period.as_u64()
                     == 0;
 
-            let skip_full_epoch_transition =
-                cfg!(feature = "fake_crypto") && rotates_sync_committee;
+            let skip_full_epoch_transition = cfg!(feature = "fake_crypto")
+                && !cfg!(feature = "eip8321_tests")
+                && rotates_sync_committee;
 
             if !skip_full_epoch_transition {
                 let mut pre_epoch_state = pre_epoch_state.clone();

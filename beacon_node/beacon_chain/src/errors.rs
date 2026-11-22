@@ -360,7 +360,8 @@ pub enum BlockProductionError {
     /// did not supply a `hash_chain_reveal` for this block.
     HashChainRandaoUnsupported,
     /// EIP-8321: the proposer has no registered hash-chain commitment, but a
-    /// `hash_chain_reveal` was supplied for this block.
+    /// `hash_chain_reveal` was supplied for this block without a legacy BLS reveal to fall back
+    /// to.
     HashChainRandaoUnexpected,
 }
 

@@ -44,6 +44,7 @@ pub trait Handler {
     }
 
     fn run(&self) {
+        #[cfg(not(feature = "eip8321_tests"))]
         for fork_name in ForkName::list_all() {
             // TODO(heze): remove this skip once Heze spec test vectors are published in
             // consensus-spec-tests.
@@ -143,6 +144,20 @@ pub trait Handler {
             .filter_map(as_directory)
             .flat_map(|suite| fs::read_dir(suite.path()).expect("suite dir exists"))
             .filter_map(as_directory)
+            .filter(|test_case_dir| {
+                let path = test_case_dir.path();
+                let manifest_only = path.join("manifest.yaml").is_file()
+                    && fs::read_dir(&path).expect("case dir exists").all(|entry| {
+                        entry.expect("case entry exists").file_name() == "manifest.yaml"
+                    });
+                if manifest_only {
+                    println!(
+                        "Skipped manifest-only fixture (no executable inputs): {}",
+                        path.display()
+                    );
+                }
+                !manifest_only
+            })
             .map(|test_case_dir| {
                 let path = test_case_dir.path();
                 let case = Self::Case::load_from_dir(&path, fork_name).expect("test should load");

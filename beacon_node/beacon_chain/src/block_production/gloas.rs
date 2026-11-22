@@ -429,6 +429,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // The preimage is supplied by the validator client, so refuse to build an invalid block
         // rather than silently falling back to the legacy reveal. Validators without a commitment
         // must keep the legacy BLS reveal and leave the hash-chain field empty.
+        //
+        // The validator client only estimates when its registration activates (it cannot know in
+        // which block the registration is included), so it may offer a preimage one epoch early.
+        // It sends a real BLS reveal alongside the preimage for that case, and the state decides
+        // which one goes into the block. Only a preimage without a usable BLS reveal is an error.
         let commitment = state
             .randao_commitments()
             .ok()
@@ -443,7 +448,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     reveal,
                 )
             } else {
-                if hash_chain_reveal.is_some() {
+                if hash_chain_reveal.is_some() && randao_reveal.is_infinity() {
                     return Err(BlockProductionError::HashChainRandaoUnexpected);
                 }
                 (randao_reveal, Hash256::ZERO)

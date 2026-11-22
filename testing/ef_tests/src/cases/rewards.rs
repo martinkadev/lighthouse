@@ -9,8 +9,9 @@ use state_processing::per_epoch_processing::base::rewards_and_penalties::Propose
 use state_processing::{
     EpochProcessingError,
     per_epoch_processing::{
-        Delta, altair,
+        Delta,
         base::{self, ValidatorStatuses, rewards_and_penalties::AttestationDelta},
+        single_pass::process_rewards_for_test_deltas,
     },
 };
 use types::BeaconState;
@@ -115,14 +116,6 @@ impl<E: EthSpec> Case for RewardsTest<E> {
         let mut state = self.pre.clone();
         let spec = &testing_spec::<E>(fork_name);
 
-        // Single-pass epoch processing doesn't compute rewards in the genesis epoch because that's
-        // what the spec for `process_rewards_and_penalties` says to do. We skip these tests for now.
-        //
-        // See: https://github.com/ethereum/consensus-specs/issues/3593
-        if fork_name != ForkName::Base && state.current_epoch() == 0 {
-            return Err(Error::SkippedKnownFailure);
-        }
-
         if let BeaconState::Base(_) = state {
             let deltas: Result<AllDeltas, EpochProcessingError> = (|| {
                 // Processing requires the committee caches.
@@ -218,7 +211,7 @@ fn compute_altair_deltas<E: EthSpec>(
         .iter()
         .map(|x| *x as i64)
         .collect::<Vec<_>>();
-    altair::process_rewards_and_penalties_slow(state, spec)?;
+    process_rewards_for_test_deltas(state, spec)?;
 
     for (delta, new_balance) in deltas.iter_mut().zip(state.balances()) {
         let old_balance = *delta;

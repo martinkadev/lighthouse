@@ -21,7 +21,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let state = &head.snapshot.beacon_state;
 
         // This topic only exists from Eip8321 onwards.
-        if !state.fork_name_unchecked().eip8321_enabled() {
+        if !state.fork_name_unchecked().eip8321_enabled()
+            || state.fork().current_version < self.spec.eip8321_fork_version
+        {
             return Err(BlockProcessingError::IncorrectStateType);
         }
 
